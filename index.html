@@ -77,6 +77,9 @@ usBlue:"#3a5a8a", usLight:"#e8f0f8", usMid:"#4a7ab5",
 };
 
 const todayISO = () => new Date().toISOString().slice(0,10);
+const favHas = (favs, stock) => Array.isArray(favs) ? favs.some(f=>typeof f==="object"?f.name===stock:f===stock) : favs instanceof Set ? favs.has(stock) : false;
+const favList = (favs) => Array.isArray(favs) ? favs.map(f=>typeof f==="object"?f.name:f) : [...(favs||[])];
+const favGetCode = (favs, stock) => { if(!Array.isArray(favs))return""; const f=favs.find(f=>typeof f==="object"&&f.name===stock); return f?.code||""; };
 const daysDiff = (d) => { const a=new Date(d),b=new Date(); a.setHours(0,0,0,0); b.setHours(0,0,0,0); return Math.floor((b-a)/86400000); };
 const fmtDate = (d) => d ? d.replace(/-/g,".") : "";
 const numVal = (s) => Number(String(s||"").replace(/,/g,""));
@@ -252,7 +255,7 @@ function ThemeInput({themes,setThemes,allThemes,ci,onSetIcon,usMode=false}) {
 }
 
 function KRModal({initial,allRecords,ci,onSetIcon,onSave,onClose}) {
-  const empty = {date:todayISO(),themes:[],stock:"",marketCap:"",change:"",tradingAmt:"",tradingAmt20:"",instFlow:"",instFlowType:"매수",foreignFlow:"",foreignFlowType:"매수",high52wPct:"",d1Change:"",d2Change:"",desc:"",reason:""};
+  const empty = {date:todayISO(),themes:[],stock:"",code:"",marketCap:"",change:"",tradingAmt:"",tradingAmt20:"",instFlow:"",instFlowType:"매수",instFlowPct:"",foreignFlow:"",foreignFlowType:"매수",foreignFlowPct:"",high52wPct:"",d1Change:"",d2Change:"",desc:"",reason:""};
   const [form,setForm] = useState(initial ? {...empty,...initial,themes:getThemes(initial),change:initial.change!=null?String(initial.change):"",d1Change:initial.d1Change!=null?String(initial.d1Change):"",d2Change:initial.d2Change!=null?String(initial.d2Change):"",high52wPct:initial.high52wPct!=null?String(initial.high52wPct):""} : empty);
   const [ss,setSs] = useState(false);
   const allT = useMemo(()=>[...new Set(allRecords.flatMap(r=>getThemes(r)))].filter(Boolean),[allRecords]);
@@ -264,7 +267,7 @@ function KRModal({initial,allRecords,ci,onSetIcon,onSave,onClose}) {
   const sN = (k) => (e) => setForm(f=>({...f,[k]:e.target.value.replace(/,/g,"").replace(/[^0-9]/g,"")}));
   const save = () => {
     if(!form.date||form.themes.length===0||!form.stock){alert("날짜, 테마, 종목명은 필수예요 🌸");return;}
-    onSave({...form,id:initial?.id||`r${Date.now()}`,theme:form.themes[0],marketCap:numVal(form.marketCap),change:Number(form.change),tradingAmt:numVal(form.tradingAmt),tradingAmt20:numVal(form.tradingAmt20),instFlow:numVal(form.instFlow)||null,foreignFlow:numVal(form.foreignFlow)||null,high52wPct:form.high52wPct!==""?Number(form.high52wPct):null,d1Change:form.d1Change!==""?Number(form.d1Change):null,d2Change:form.d2Change!==""?Number(form.d2Change):null});
+    onSave({...form,id:initial?.id||`r${Date.now()}`,theme:form.themes[0],code:form.code||"",marketCap:numVal(form.marketCap),change:Number(form.change),tradingAmt:numVal(form.tradingAmt),tradingAmt20:numVal(form.tradingAmt20),instFlow:form.instFlow||null,instFlowPct:form.instFlowPct||null,foreignFlow:form.foreignFlow||null,foreignFlowPct:form.foreignFlowPct||null,high52wPct:form.high52wPct!==""?Number(form.high52wPct):null,d1Change:form.d1Change!==""?Number(form.d1Change):null,d2Change:form.d2Change!==""?Number(form.d2Change):null});
   };
   const lS = {fontSize:11,fontWeight:700,color:C.sub,display:"block",marginBottom:4};
   return (
@@ -278,7 +281,7 @@ function KRModal({initial,allRecords,ci,onSetIcon,onSave,onClose}) {
           <SLabel>📋 기본 정보</SLabel>
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
             <div><label style={lS}>날짜 *</label><input type="date" value={form.date} onChange={sf("date")} style={{...iBase,fontSize:12,width:"auto",minWidth:160,maxWidth:"100%"}}/></div>
-            <div style={{position:"relative"}}><label style={lS}>종목명 *</label><input value={form.stock} onChange={e=>{sf("stock")(e);setSs(true);}} onFocus={()=>setSs(true)} onBlur={()=>setTimeout(()=>setSs(false),150)} placeholder="예: 삼성전자" style={iBase}/>{ss&&fS.length>0&&<div style={{position:"absolute",zIndex:10,width:"100%",borderRadius:12,boxShadow:`0 4px 16px ${C.pink1}30`,marginTop:4,border:`1.5px solid ${C.border}`,background:C.card,overflow:"hidden"}}>{fS.map(st=><div key={st} style={{padding:"10px 14px",fontSize:13,cursor:"pointer",color:C.text}} onMouseDown={()=>{setForm(f=>({...f,stock:st}));setSs(false);}}>{st}</div>)}</div>}</div>
+            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:10}}><div style={{position:"relative"}}><label style={lS}>종목명 *</label><input value={form.stock} onChange={e=>{sf("stock")(e);setSs(true);}} onFocus={()=>setSs(true)} onBlur={()=>setTimeout(()=>setSs(false),150)} placeholder="예: 삼성전자" style={iBase}/>{ss&&fS.length>0&&<div style={{position:"absolute",zIndex:10,width:"100%",borderRadius:12,boxShadow:`0 4px 16px ${C.pink1}30`,marginTop:4,border:`1.5px solid ${C.border}`,background:C.card,overflow:"hidden"}}>{fS.map(st=><div key={st} style={{padding:"10px 14px",fontSize:13,cursor:"pointer",color:C.text}} onMouseDown={()=>{setForm(f=>({...f,stock:st}));setSs(false);}}>{st}</div>)}</div></div><div><label style={lS}>종목코드</label><input value={form.code||""} onChange={sf("code")} placeholder="005930" style={{...iBase,fontWeight:700}}/></div></div>
             {form.stock&&stl.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:6}}>{stl.map(t=><button key={t} onMouseDown={()=>setForm(f=>({...f,themes:f.themes.includes(t)?f.themes.filter(x=>x!==t):[...f.themes,t]}))} style={{padding:"4px 12px",borderRadius:20,border:`1.5px solid ${form.themes.includes(t)?C.pink1:C.border}`,background:form.themes.includes(t)?C.pink3:C.cream1,fontSize:12,fontWeight:700,color:form.themes.includes(t)?C.pink1:C.sub,cursor:"pointer"}}>{form.themes.includes(t)?"✅":"○"} {getThemeIcon(t,ci)} {t}</button>)}</div>}
             <div><label style={lS}>테마 *</label><ThemeInput themes={form.themes} setThemes={t=>setForm(f=>({...f,themes:t}))} allThemes={allT} ci={ci} onSetIcon={onSetIcon}/></div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -294,8 +297,8 @@ function KRModal({initial,allRecords,ci,onSetIcon,onSave,onClose}) {
             </div>
             {ratio&&<div style={{background:C.yellow2,borderRadius:10,padding:"8px 12px",fontSize:12,color:"#b09020",fontWeight:700}}>📌 평균 대비 ×{ratio}배</div>}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-              <div><label style={lS}>기관 수급</label><div style={{display:"flex",gap:6}}><select value={form.instFlowType} onChange={sf("instFlowType")} style={{...iBase,width:70,padding:"10px 6px",flexShrink:0}}><option>매수</option><option>매도</option></select><input type="text" inputMode="numeric" value={fmtNum(form.instFlow)} onChange={sN("instFlow")} placeholder="금액" style={iBase}/></div>{form.instFlow&&<p style={{fontSize:11,color:C.pink1,marginTop:3}}>→ {fmtMillion(numVal(form.instFlow))}</p>}</div>
-              <div><label style={lS}>외국인 수급</label><div style={{display:"flex",gap:6}}><select value={form.foreignFlowType} onChange={sf("foreignFlowType")} style={{...iBase,width:70,padding:"10px 6px",flexShrink:0}}><option>매수</option><option>매도</option></select><input type="text" inputMode="numeric" value={fmtNum(form.foreignFlow)} onChange={sN("foreignFlow")} placeholder="금액" style={iBase}/></div>{form.foreignFlow&&<p style={{fontSize:11,color:C.pink1,marginTop:3}}>→ {fmtMillion(numVal(form.foreignFlow))}</p>}</div>
+              <div><label style={lS}>기관 수급</label><div style={{display:"flex",gap:6}}><select value={form.instFlowType} onChange={sf("instFlowType")} style={{...iBase,width:70,padding:"10px 6px",flexShrink:0}}><option>매수</option><option>매도</option></select><div style={{position:"relative",flex:1}}><input type="text" inputMode="numeric" value={form.instFlow} onChange={e=>setForm(f=>({...f,instFlow:e.target.value.replace(/[^0-9.]/g,"")}))} placeholder="0" style={{...iBase,paddingRight:36}}/><span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",fontSize:11,color:C.sub,pointerEvents:"none"}}>만주</span></div><div style={{position:"relative",width:80,flexShrink:0}}><input type="text" inputMode="numeric" value={form.instFlowPct||""} onChange={e=>setForm(f=>({...f,instFlowPct:e.target.value.replace(/[^0-9.]/g,"")}))} placeholder="0.0" style={{...iBase,paddingRight:20}}/><span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontSize:11,color:C.sub,pointerEvents:"none"}}>%</span></div></div>{form.instFlow&&<p style={{fontSize:11,color:C.pink1,marginTop:3}}>→ 기관 {form.instFlowType} {form.instFlow}만주{form.instFlowPct?` (${form.instFlowPct}%)`:""}</p>}</div>
+              <div><label style={lS}>외국인 수급</label><div style={{display:"flex",gap:6}}><select value={form.foreignFlowType} onChange={sf("foreignFlowType")} style={{...iBase,width:70,padding:"10px 6px",flexShrink:0}}><option>매수</option><option>매도</option></select><div style={{position:"relative",flex:1}}><input type="text" inputMode="numeric" value={form.foreignFlow} onChange={e=>setForm(f=>({...f,foreignFlow:e.target.value.replace(/[^0-9.]/g,"")}))} placeholder="0" style={{...iBase,paddingRight:36}}/><span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",fontSize:11,color:C.sub,pointerEvents:"none"}}>만주</span></div><div style={{position:"relative",width:80,flexShrink:0}}><input type="text" inputMode="numeric" value={form.foreignFlowPct||""} onChange={e=>setForm(f=>({...f,foreignFlowPct:e.target.value.replace(/[^0-9.]/g,"")}))} placeholder="0.0" style={{...iBase,paddingRight:20}}/><span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontSize:11,color:C.sub,pointerEvents:"none"}}>%</span></div></div>{form.foreignFlow&&<p style={{fontSize:11,color:C.pink1,marginTop:3}}>→ 외인 {form.foreignFlowType} {form.foreignFlow}만주{form.foreignFlowPct?` (${form.foreignFlowPct}%)`:""}</p>}</div>
             </div>
           </div>
           <SLabel>📈 차트 기준</SLabel>
@@ -552,12 +555,14 @@ function KRDetail({rec,q=""}) {
     <div style={{display:"flex",flexDirection:"column",gap:6}}>
       {rec.desc&&<p style={{fontSize:12,color:C.sub,margin:0}}>{hl(rec.desc)}</p>}
       {rec.reason&&<p style={{fontSize:12,color:C.text,background:C.pink3,borderRadius:8,padding:"6px 10px",margin:0}}><span style={{color:C.pink1,fontWeight:700}}>↑ </span>{hl(rec.reason)}</p>}
-      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+      {(rec.tradingAmt||ratio)&&<div style={{display:"flex",gap:4}}>
         {rec.tradingAmt&&<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:C.yellow2,color:"#b09020",fontWeight:700}}>거래대금 {fmtMillion(rec.tradingAmt)}</span>}
         {ratio&&<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:C.yellow2,color:"#b09020",fontWeight:700}}>×{ratio}배</span>}
-        {rec.instFlow&&<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:rec.instFlowType==="매수"?C.mint2:C.coral2,color:rec.instFlowType==="매수"?"#2a9d8f":"#b06040",fontWeight:600}}>기관 {rec.instFlowType} {fmtMillion(rec.instFlow)}</span>}
-        {rec.foreignFlow&&<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:rec.foreignFlowType==="매수"?C.blue2:C.pink2,color:rec.foreignFlowType==="매수"?"#4a7ab5":"#c0607a",fontWeight:600}}>외인 {rec.foreignFlowType} {fmtMillion(rec.foreignFlow)}</span>}
-      </div>
+      </div>}
+      {(rec.instFlow||rec.foreignFlow)&&<div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+        {rec.instFlow&&<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:rec.instFlowType==="매수"?C.mint2:C.coral2,color:rec.instFlowType==="매수"?"#2a9d8f":"#b06040",fontWeight:600}}>기관 {rec.instFlowType} {rec.instFlow}만주{rec.instFlowPct?` (${rec.instFlowPct}%)`:""}</span>}
+        {rec.foreignFlow&&<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:rec.foreignFlowType==="매수"?C.blue2:C.pink2,color:rec.foreignFlowType==="매수"?"#4a7ab5":"#c0607a",fontWeight:600}}>외인 {rec.foreignFlowType} {rec.foreignFlow}만주{rec.foreignFlowPct?` (${rec.foreignFlowPct}%)`:""}</span>}
+      </div>}
       {rec.high52wPct!=null&&<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:"#f7d6e0",color:"#c0305a",fontWeight:700}}>고점 {rec.high52wPct>0?"+":""}{rec.high52wPct}%</span>}
       <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
         {rec.d1Change!=null?<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:C.card,border:`1.5px solid ${rec.d1Change>0?C.pink1:"#a8d4f2"}`,color:cc(rec.d1Change),fontWeight:700}}>1일 {rec.d1Change>0?"+":""}{rec.d1Change}%</span>:<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:"#f5f5f5",color:"#aaa"}}>1일 —</span>}
@@ -583,7 +588,7 @@ function USCard({card,onEdit,onDelete,favorites,toggleFav,ci,q=""}) {
   const isClosed = !!card.closedReason;
   const vsT = card.currentPrice&&card.targetPrice ? ((card.targetPrice-card.currentPrice)/card.currentPrice*100).toFixed(1) : null;
   const p52 = card.currentPrice&&card.high52w&&card.low52w&&card.high52w!==card.low52w ? (((card.currentPrice-card.low52w)/(card.high52w-card.low52w))*100).toFixed(0) : null;
-  const isFav = favorites.has(card.stock);
+  const isFav = favHas(favorites,card.stock);
   const hl = (text) => { if(!q||!text)return text; const s=String(text),idx=s.toLowerCase().indexOf(q.toLowerCase()); if(idx<0)return s; return <>{s.slice(0,idx)}<mark style={{background:"#FFE566",borderRadius:3,padding:"0 2px"}}>{s.slice(idx,idx+q.length)}</mark>{s.slice(idx+q.length)}</>; };
   return (
     <div style={{background:C.card,borderRadius:18,overflow:"hidden",border:`1px solid ${isClosed?"#e8e8e8":C.usLight}`,boxShadow:`0 2px 10px ${C.usLight}`,opacity:isClosed?0.7:1}}>
@@ -1212,6 +1217,15 @@ function IPOTab({records,setRecords,schedules,setSchedules,onAddRec,onAddSched})
 // ── 메인 앱 ──
 function App({user}) {
   const fb = window.__firebase;
+  const [, forceUpdate] = React.useReducer(x=>x+1, 0);
+  React.useEffect(()=>{
+    const vv = window.visualViewport;
+    if(!vv) return;
+    const handler = () => forceUpdate();
+    vv.addEventListener("resize", handler);
+    vv.addEventListener("scroll", handler);
+    return () => { vv.removeEventListener("resize", handler); vv.removeEventListener("scroll", handler); };
+  }, []);
   const [krRecords,setKrRecords] = useState([]);
   const [usCards,setUsCards] = useState([]);
   const [memos,setMemos] = useState([]);
@@ -1222,7 +1236,7 @@ function App({user}) {
   const [search,setSearch] = useState("");
   const [openThemes,setOpenThemes] = useState({});
   const [openStocks,setOpenStocks] = useState({});
-  const [favorites,setFavorites] = useState(new Set());
+  const [favorites,setFavorites] = useState([]);
   const [ci,setCi] = useState({});
   const [leaders,setLeaders] = useState({});
   const [modal,setModal] = useState(null);
@@ -1259,13 +1273,13 @@ function App({user}) {
       if(snap.exists()){
         const d=snap.data();
         if(d.principle) setPrinciple(d.principle);
-        if(d.favorites) setFavorites(new Set(d.favorites));
+        if(d.favorites) setFavorites(d.favorites);
         if(d.customIcons) setCi(d.customIcons);
         if(d.themeLeaders) setLeaders(d.themeLeaders);
         if(d.holdings) setHoldings(d.holdings);
       }
     });
-    return()=>{unsubKR();unsubUS();unsubMemos();unsubIPORec();unsubIPOSched();unsubMeta();};
+    cleanFavs(krRecords,usCards); return()=>{unsubKR();unsubUS();unsubMemos();unsubIPORec();unsubIPOSched();unsubMeta();};
   },[user]);
 
   const saveMeta = async(data)=>{
@@ -1280,7 +1294,14 @@ function App({user}) {
   };
 
 
-  const toggleFav = (s) => { const n=new Set(favorites); n.has(s)?n.delete(s):n.add(s); setFavorites(n); saveMeta({favorites:[...n]}); };
+  const addFav = (stock, code="") => { if(favHas(favorites,stock))return; const next=[...favorites,{name:stock,code}]; setFavorites(next); saveMeta({favorites:next}); };
+  const removeFav = (stock) => { const next=favorites.filter(f=>(typeof f==="object"?f.name:f)!==stock); setFavorites(next); saveMeta({favorites:next}); };
+  const toggleFav = (stock, code="") => { favHas(favorites,stock)?removeFav(stock):addFav(stock,code); };
+  const cleanFavs = (krs, uss) => {
+    const allStocks = new Set([...krs.map(r=>r.stock), ...uss.map(c=>c.stock)]);
+    const next = favorites.filter(f=>{const n=typeof f==="object"?f.name:f; return allStocks.has(n);});
+    if(next.length !== favorites.length){ setFavorites(next); saveMeta({favorites:next}); }
+  };
   const saveHolding = (info) => { const next=[...holdings.filter(h=>h.stock!==info.stock),info]; setHoldings(next); saveMeta({holdings:next}); };
   const deleteHolding = (stock) => { const next=holdings.filter(h=>h.stock!==stock); setHoldings(next); saveMeta({holdings:next}); };
   const getHolding = (stock) => holdings.find(h=>h.stock===stock);
@@ -1288,9 +1309,26 @@ function App({user}) {
   const setIcon = (t,e) => { const next={...ci,[t]:e}; setCi(next); saveMeta({customIcons:next}); };
   const saveLeader = (t,s) => { const next={...leaders,[t]:s}; setLeaders(next); saveMeta({themeLeaders:next}); setLeaderModal(null); };
   const saveKR = async(rec)=>{if(!user)return;setSaving(true);try{await fb.setDoc(fb.doc(fb.db,`users/${user.uid}/krRecords/${rec.id}`),rec);}catch(e){console.error(e);}setSaving(false);setModal(null);};
-  const deleteKR = async(id)=>{if(!user)return;try{await fb.deleteDoc(fb.doc(fb.db,`users/${user.uid}/krRecords/${id}`));}catch(e){console.error(e);}setDelModal(null);};
+  const deleteKR = async(id)=>{
+    if(!user)return;
+    const rec=krRecords.find(r=>r.id===id);
+    try{await fb.deleteDoc(fb.doc(fb.db,`users/${user.uid}/krRecords/${id}`));}catch(e){console.error(e);}
+    if(rec){
+      const remaining=krRecords.filter(r=>r.id!==id&&r.stock===rec.stock);
+      if(remaining.length===0&&!usCards.some(c=>c.stock===rec.stock)) removeFav(rec.stock);
+    }
+    setDelModal(null);
+  };
   const saveUS = async(card)=>{if(!user)return;setSaving(true);try{await fb.setDoc(fb.doc(fb.db,`users/${user.uid}/usCards/${card.id}`),card);}catch(e){console.error(e);}setSaving(false);setModal(null);};
-  const deleteUS = async(id)=>{if(!user)return;try{await fb.deleteDoc(fb.doc(fb.db,`users/${user.uid}/usCards/${id}`));}catch(e){console.error(e);}setDelModal(null);};
+  const deleteUS = async(id)=>{
+    if(!user)return;
+    const card=usCards.find(c=>c.id===id);
+    try{await fb.deleteDoc(fb.doc(fb.db,`users/${user.uid}/usCards/${id}`));}catch(e){console.error(e);}
+    if(card){
+      if(!krRecords.some(r=>r.stock===card.stock)) removeFav(card.stock);
+    }
+    setDelModal(null);
+  };
   const saveMemo = async(memo)=>{if(!user)return;setSaving(true);try{await fb.setDoc(fb.doc(fb.db,`users/${user.uid}/memos/${memo.id}`),memo);}catch(e){console.error(e);}setSaving(false);setMemoModal(null);};
   const deleteMemo = async(id)=>{if(!user)return;try{await fb.deleteDoc(fb.doc(fb.db,`users/${user.uid}/memos/${id}`));}catch(e){console.error(e);}setMemoDelModal(null);};
   const saveP = () => { setPrinciple(pForm); saveMeta({principle:pForm}); setEditP(false); };
@@ -1304,7 +1342,7 @@ function App({user}) {
   const setIpoSchedulesWrapped=(updater)=>{const next=typeof updater==="function"?updater(ipoSchedules):updater;next.forEach(s=>{const ex=ipoSchedules.find(x=>x.id===s.id);if(!ex||JSON.stringify(ex)!==JSON.stringify(s))saveIpoSched(s);});ipoSchedules.forEach(s=>{if(!next.find(x=>x.id===s.id))deleteIpoSched(s.id);});};
 
   const exportJSON = () => {
-    const data = {krRecords,usCards,memos,ipoRecords,ipoSchedules,favorites:[...favorites],principle,customIcons:ci,themeLeaders:leaders};
+    const data = {krRecords,usCards,memos,ipoRecords,ipoSchedules,favorites:favorites,principle,customIcons:ci,themeLeaders:leaders};
     const url = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
     const a = document.createElement("a"); a.href=url; a.download="seohyun_note.json"; a.click(); URL.revokeObjectURL(url);
   };
@@ -1419,18 +1457,17 @@ function App({user}) {
                 </div>
               </button>
               {isOpen&&sortedS.map(([stock,sRecs])=>{
-                const key=`${theme}_${stock}`; const isFav=favorites.has(stock); const isLeader=leader===stock; const hasPending=sRecs.some(r=>r.d1Change==null||r.d2Change==null); const avgSC=(sRecs.reduce((s,r)=>s+(r.change||0),0)/sRecs.length).toFixed(2); const latest=sRecs.reduce((a,b)=>a.date>b.date?a:b); const mc=latest.marketCap>=10000?`${(latest.marketCap/10000).toFixed(0)}조`:`${(latest.marketCap||0).toLocaleString()}억`; const otherT=[...new Set(krRecords.filter(r=>r.stock===stock).flatMap(r=>getThemes(r)))].filter(t=>t!==theme);
+                const key=`${theme}_${stock}`; const isFav=favHas(favorites,stock); const isLeader=leader===stock; const hasPending=sRecs.some(r=>r.d1Change==null||r.d2Change==null); const avgSC=(sRecs.reduce((s,r)=>s+(r.change||0),0)/sRecs.length).toFixed(2); const latest=sRecs.reduce((a,b)=>a.date>b.date?a:b); const mc=latest.marketCap>=10000?`${(latest.marketCap/10000).toFixed(0)}조`:`${(latest.marketCap||0).toLocaleString()}억`; const otherT=[...new Set(krRecords.filter(r=>r.stock===stock).flatMap(r=>getThemes(r)))].filter(t=>t!==theme);
                 return (
                   <div key={key} style={{borderTop:`1px solid ${C.border}`,background:C.bg}}>
                     <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                         {isLeader&&<span>👑</span>}
-                        <span style={{fontWeight:700,fontSize:14,color:C.text}}>{stock}</span>
-                        <span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:C.card,color:"#424242",fontWeight:600,border:`1px solid ${C.border}`}}>{mc}</span>
+                        <span style={{fontWeight:700,fontSize:14,color:C.text}}>{stock}</span>{(()=>{const code=[...krRecords.filter(r=>r.stock===stock)].find(r=>r.code)?.code;return code?<span style={{fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:8,background:C.pink3,color:C.pink1}}>{code}</span>:null;})()}<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:C.card,color:"#424242",fontWeight:600,border:`1px solid ${C.border}`}}>{mc}</span>
                         <span style={{fontSize:12,fontWeight:700,color:Number(avgSC)>=0?"#c0607a":"#4a7ab5"}}>{Number(avgSC)>=0?"+":""}{avgSC}%</span>
                         {otherT.length>0&&<span style={{fontSize:11,color:"#8060a0",background:"#f0e8f8",padding:"2px 7px",borderRadius:20,fontWeight:700}}>📚 {otherT.join(", ")}</span>}
                         {hasPending&&<span style={{fontSize:11,color:"#b06040",background:C.coral2,padding:"2px 6px",borderRadius:20}}>🔔</span>}
-                        <button onClick={()=>toggleFav(stock)} style={{marginLeft:"auto",padding:4,background:"none",border:"none",cursor:"pointer",fontSize:15}}>{isFav?"⭐":"☆"}</button>
+                        <button onClick={()=>toggleFav(stock, sRecs.find(r=>r.code)?.code||"")} style={{marginLeft:"auto",padding:4,background:"none",border:"none",cursor:"pointer",fontSize:15}}>{isFav?"⭐":"☆"}</button>
                       </div>
                       <div style={{display:"flex",flexDirection:"column",gap:6,paddingLeft:8,borderLeft:`2px solid ${C.border}`}}>
                         {[...sRecs].sort((a,b)=>b.date.localeCompare(a.date)).map(rec=>{
@@ -1480,18 +1517,17 @@ function App({user}) {
 
         {tab==="fav"&&<>
           <div style={{borderRadius:18,overflow:"hidden",border:`1px solid ${C.border}`,boxShadow:`0 2px 10px ${C.pink1}20`}}>
-            <button onClick={()=>setFavKROpen(p=>!p)} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 16px",background:C.card,border:"none",cursor:"pointer"}}><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:16}}>🇰🇷</span><span style={{fontWeight:800,fontSize:14,color:C.text}}>국내주식</span><span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:C.pink3,color:C.pink1,fontWeight:700}}>{[...new Set(krRecords.filter(r=>favorites.has(r.stock)).map(r=>r.stock))].length}종목</span>{holdings.filter(h=>[...new Set(krRecords.filter(r=>favorites.has(r.stock)).map(r=>r.stock))].includes(h.stock)).length>0&&<span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:C.mint2,color:"#2a9d8f",fontWeight:700}}>🟢 {holdings.filter(h=>[...new Set(krRecords.filter(r=>favorites.has(r.stock)).map(r=>r.stock))].includes(h.stock)).length}보유</span>}</div><span style={{fontSize:14,color:C.pink1}}>{favKROpen?"▲":"▼"}</span></button>
+            <button onClick={()=>setFavKROpen(p=>!p)} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 16px",background:C.card,border:"none",cursor:"pointer"}}><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:16}}>🇰🇷</span><span style={{fontWeight:800,fontSize:14,color:C.text}}>국내주식</span><span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:C.pink3,color:C.pink1,fontWeight:700}}>{[...new Set(krRecords.filter(r=>favHas(favorites,r.stock)).map(r=>r.stock))].length}종목</span>{holdings.filter(h=>[...new Set(krRecords.filter(r=>favHas(favorites,r.stock)).map(r=>r.stock))].includes(h.stock)).length>0&&<span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:C.mint2,color:"#2a9d8f",fontWeight:700}}>🟢 {holdings.filter(h=>[...new Set(krRecords.filter(r=>favHas(favorites,r.stock)).map(r=>r.stock))].includes(h.stock)).length}보유</span>}</div><span style={{fontSize:14,color:C.pink1}}>{favKROpen?"▲":"▼"}</span></button>
             {favKROpen&&<div style={{background:C.bg,borderTop:`1px solid ${C.border}`}}>
-              {[...new Set(krRecords.filter(r=>favorites.has(r.stock)).map(r=>r.stock))].length===0?<p style={{textAlign:"center",color:C.sub,fontSize:13,padding:"24px 0"}}>관심 국내주식이 없어요 ⭐</p>:[...new Set(krRecords.filter(r=>favorites.has(r.stock)).map(r=>r.stock))].map(stock=>{
+              {[...new Set(krRecords.filter(r=>favHas(favorites,r.stock)).map(r=>r.stock))].length===0?<p style={{textAlign:"center",color:C.sub,fontSize:13,padding:"24px 0"}}>관심 국내주식이 없어요 ⭐</p>:[...new Set(krRecords.filter(r=>favHas(favorites,r.stock)).map(r=>r.stock))].map(stock=>{
                 const sRecs=[...krRecords.filter(r=>r.stock===stock)].sort((a,b)=>b.date.localeCompare(a.date));
-                const lat=sRecs[0]; const themes=[...new Set(sRecs.flatMap(r=>getThemes(r)))]; const avgC=(sRecs.reduce((s,r)=>s+(r.change||0),0)/sRecs.length).toFixed(2); const mc=lat.marketCap>=10000?`${(lat.marketCap/10000).toFixed(0)}조`:`${(lat.marketCap||0).toLocaleString()}억`; const isLeader=Object.entries(leaders).some(([,v])=>v===stock); const hasPending=sRecs.some(r=>r.d1Change==null||r.d2Change==null);
+                const lat=sRecs[0]; const themes=[...new Set(sRecs.flatMap(r=>getThemes(r)))]; const avgC=(sRecs.reduce((s,r)=>s+(r.change||0),0)/sRecs.length).toFixed(2); const mc=lat.marketCap>=10000?`${(lat.marketCap/10000).toFixed(0)}조`:`${(lat.marketCap||0).toLocaleString()}억`; const isLeader=Object.entries(leaders).some(([,v])=>v===stock); const hasPending=sRecs.some(r=>r.d1Change==null||r.d2Change==null); const stockCode=sRecs.find(r=>r.code)?.code||favGetCode(favorites,stock);
                 return (
                   <div key={stock} style={{borderTop:`1px solid ${C.card}`}}>
                     <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
                         {isLeader&&<span>👑</span>}
-                        <span style={{fontWeight:700,fontSize:14,color:C.text}}>{stock}</span>
-                        <span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:C.card,color:"#424242",fontWeight:600,border:`1px solid ${C.border}`}}>{mc}</span>
+                        <span style={{fontWeight:700,fontSize:14,color:C.text}}>{stock}</span>{stockCode&&<span style={{fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:8,background:C.pink3,color:C.pink1}}>{stockCode}</span>}<span style={{fontSize:11,padding:"2px 7px",borderRadius:8,background:C.card,color:"#424242",fontWeight:600,border:`1px solid ${C.border}`}}>{mc}</span>
                         <span style={{fontSize:12,fontWeight:700,color:Number(avgC)>=0?"#c0607a":"#4a7ab5"}}>{Number(avgC)>=0?"+":""}{avgC}%</span>
                         {themes.map(t=><span key={t} style={{fontSize:11,padding:"2px 7px",borderRadius:20,background:C.pink3,color:"#d4507a",fontWeight:700}}>{getThemeIcon(t,ci)} {t}</span>)}
                         {hasPending&&<span style={{fontSize:11,color:"#b06040",background:C.coral2,padding:"2px 6px",borderRadius:20}}>🔔</span>}
@@ -1533,13 +1569,13 @@ function App({user}) {
           </div>
           <div style={{borderRadius:18,overflow:"hidden",border:`1px solid ${C.usLight}`,boxShadow:`0 2px 10px ${C.usLight}`}}>
             <button onClick={()=>setFavUSOpen(p=>!p)} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 16px",background:C.card,border:"none",cursor:"pointer"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:16}}>🇺🇸</span><span style={{fontWeight:800,fontSize:14,color:C.usBlue}}>미국주식</span><span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:C.usLight,color:C.usMid,fontWeight:700}}>{usCards.filter(c=>favorites.has(c.stock)).length}종목</span></div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:16}}>🇺🇸</span><span style={{fontWeight:800,fontSize:14,color:C.usBlue}}>미국주식</span><span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:C.usLight,color:C.usMid,fontWeight:700}}>{usCards.filter(c=>favHas(favorites,c.stock)).length}종목</span></div>
               <span style={{fontSize:14,color:C.usMid}}>{favUSOpen?"▲":"▼"}</span>
             </button>
             {favUSOpen&&<div style={{background:C.bg,borderTop:`1px solid ${C.usLight}`}}>
-              {usCards.filter(c=>favorites.has(c.stock)).length===0
+              {usCards.filter(c=>favHas(favorites,c.stock)).length===0
                 ? <p style={{textAlign:"center",color:C.sub,fontSize:13,padding:"24px 0"}}>관심 미국주식이 없어요 ⭐</p>
-                : usCards.filter(c=>favorites.has(c.stock)).map(card=>{
+                : usCards.filter(c=>favHas(favorites,c.stock)).map(card=>{
                     const isClosed=!!card.closedReason;
                     const vsT=card.currentPrice&&card.targetPrice?((card.targetPrice-card.currentPrice)/card.currentPrice*100).toFixed(1):null;
                     const p52=card.currentPrice&&card.high52w&&card.low52w&&card.high52w!==card.low52w?(((card.currentPrice-card.low52w)/(card.high52w-card.low52w))*100).toFixed(0):null;
@@ -1615,7 +1651,7 @@ function App({user}) {
             <button key={id} onClick={()=>setTab(id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",padding:"10px 0 7px",gap:2,background:"none",border:"none",cursor:"pointer",color:tab===id?ac:C.sub}}>
               <div style={{width:36,height:36,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",background:tab===id?ab:"transparent",fontSize:18,position:"relative"}}>
                 {icon}
-                {id==="fav"&&favorites.size>0&&<span style={{position:"absolute",top:-4,right:-4,width:16,height:16,background:C.pink1,color:"white",fontSize:10,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center"}}>{favorites.size}</span>}
+                {id==="fav"&&favorites.length>0&&<span style={{position:"absolute",top:-4,right:-4,width:16,height:16,background:C.pink1,color:"white",fontSize:10,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center"}}>{favorites.length}</span>}
                 {id==="memo"&&memos.length>0&&<span style={{position:"absolute",top:-4,right:-4,width:16,height:16,background:"#b06040",color:"white",fontSize:10,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center"}}>{memos.length}</span>}
               </div>
               <span style={{fontSize:10,fontWeight:tab===id?800:600}}>{label}</span>
@@ -1646,6 +1682,15 @@ function AppWithAuth() {
   const [authLoading, setAuthLoading] = React.useState(true);
   const [loginLoading, setLoginLoading] = React.useState(false);
   const fb = window.__firebase;
+  const [, forceUpdate] = React.useReducer(x=>x+1, 0);
+  React.useEffect(()=>{
+    const vv = window.visualViewport;
+    if(!vv) return;
+    const handler = () => forceUpdate();
+    vv.addEventListener("resize", handler);
+    vv.addEventListener("scroll", handler);
+    return () => { vv.removeEventListener("resize", handler); vv.removeEventListener("scroll", handler); };
+  }, []);
 
   React.useEffect(()=>{
     const unsub = fb.onAuthStateChanged(fb.auth, u=>{setUser(u);setAuthLoading(false);});
