@@ -1283,7 +1283,7 @@ function App({user}) {
       if(snap.exists()){
         const d=snap.data();
         if(d.principle) setPrinciple(d.principle);
-        if(d.favorites) setFavorites(d.favorites);
+        if(d.favorites) setFavorites(d.favorites); // cleanFavs는 useEffect로 처리
         if(d.customIcons) setCi(d.customIcons);
         if(d.themeLeaders) setLeaders(d.themeLeaders);
         if(d.holdings) setHoldings(d.holdings);
@@ -1297,6 +1297,17 @@ function App({user}) {
     try{await fb.setDoc(fb.doc(fb.db,`users/${user.uid}/meta/main`),data,{merge:true});}catch(e){console.error(e);}
     setSaving(false);
   };
+
+  // favorites 자동 정리: krRecords/usCards 변화 시 실행
+  React.useEffect(()=>{
+    if(!user || favorites.length === 0) return;
+    const allStocks = new Set([...krRecords.map(r=>r.stock), ...usCards.map(c=>c.stock)]);
+    const next = favorites.filter(f=>{const n=typeof f==="object"?f.name:f; return allStocks.has(n);});
+    if(next.length !== favorites.length){
+      setFavorites(next);
+      fb.setDoc(fb.doc(fb.db,`users/${user.uid}/meta/main`),{favorites:next},{merge:true}).catch(console.error);
+    }
+  },[krRecords, usCards]);
 
   const logout = async()=>{
     await fb.signOut(fb.auth);
