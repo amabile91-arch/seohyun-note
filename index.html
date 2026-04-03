@@ -1236,15 +1236,6 @@ function App({user}) {
     vv.addEventListener("scroll", handler);
     return () => { vv.removeEventListener("resize", handler); vv.removeEventListener("scroll", handler); };
   }, []);
-  const [, forceUpdate] = React.useReducer(x=>x+1, 0);
-  React.useEffect(()=>{
-    const vv = window.visualViewport;
-    if(!vv) return;
-    const handler = () => forceUpdate();
-    vv.addEventListener("resize", handler);
-    vv.addEventListener("scroll", handler);
-    return () => { vv.removeEventListener("resize", handler); vv.removeEventListener("scroll", handler); };
-  }, []);
   const [krRecords,setKrRecords] = useState([]);
   const [usCards,setUsCards] = useState([]);
   const [memos,setMemos] = useState([]);
