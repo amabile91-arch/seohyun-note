@@ -1672,7 +1672,7 @@ function App({user}) {
             <button key={id} onClick={()=>setTab(id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",padding:"10px 0 7px",gap:2,background:"none",border:"none",cursor:"pointer",color:tab===id?ac:C.sub}}>
               <div style={{width:36,height:36,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",background:tab===id?ab:"transparent",fontSize:18,position:"relative"}}>
                 {icon}
-                {id==="fav"&&favorites.length>0&&<span style={{position:"absolute",top:-4,right:-4,width:16,height:16,background:C.pink1,color:"white",fontSize:10,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center"}}>{favorites.length}</span>}
+                {id==="fav"&&(()=>{const cnt=[...new Set(krRecords.filter(r=>favHas(favorites,r.stock)).map(r=>r.stock))].length+usCards.filter(c=>favHas(favorites,c.stock)).length;return cnt>0?<span style={{position:"absolute",top:-4,right:-4,width:16,height:16,background:C.pink1,color:"white",fontSize:10,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center"}}>{cnt}</span>:null;})()}
                 {id==="memo"&&memos.length>0&&<span style={{position:"absolute",top:-4,right:-4,width:16,height:16,background:"#b06040",color:"white",fontSize:10,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center"}}>{memos.length}</span>}
               </div>
               <span style={{fontSize:10,fontWeight:tab===id?800:600}}>{label}</span>
