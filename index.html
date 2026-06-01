@@ -13,7 +13,7 @@
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
   import {
     getFirestore, doc, setDoc, deleteDoc, onSnapshot,
-    collection, writeBatch
+    collection, writeBatch, getDoc
   } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -33,7 +33,7 @@
     auth, db, provider,
     signInWithPopup, signOut, onAuthStateChanged,
     doc, setDoc, deleteDoc, onSnapshot,
-    collection, writeBatch
+    collection, writeBatch, getDoc
   };
 </script>
 <style>
@@ -640,278 +640,884 @@ function USCard({card,onEdit,onDelete,favorites,toggleFav,ci,q=""}) {
 }
 
 // ── AI 분석 탭 ──
-function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle }) {
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-  const [activeMode, setActiveMode] = useState(null);
+// ── 새 탭 컴포넌트들 (매매플랜, 종목체크) ──
+function computeRiskPlan({ account, riskPct, entry, stop, maxWeightPct }) {
+  if (!(entry > 0)) return { error: "진입가를 입력하세요" };
+  const stopDist = entry - stop;
+  if (!(stopDist > 0)) return { error: "손절가는 진입가보다 낮아야 합니다" };
+  const riskAmount    = account * (riskPct / 100);
+  const stopPctVal    = (stopDist / entry) * 100;
+  const sharesByRisk  = Math.floor(riskAmount / stopDist);
+  const maxCapital    = account * (maxWeightPct / 100);
+  const sharesByWeight = Math.floor(maxCapital / entry);
+  const shares        = Math.max(0, Math.min(sharesByRisk, sharesByWeight));
+  const cost          = shares * entry;
+  const maxLoss       = shares * stopDist;
+  const weightPct     = (cost / account) * 100;
+  const limitedBy     = sharesByRisk <= sharesByWeight ? "risk" : "weight";
+  const overLossCap   = stopPctVal > 12;
+  return { riskAmount, stopDist, stopPctVal, sharesByRisk, sharesByWeight,
+           shares, cost, maxLoss, weightPct, limitedBy, overLossCap };
+}
 
-  const MODES = [
-    { id: "pattern", icon: "🔍", label: "승률 패턴 분석", color: C.pink1, bg: C.pink3,
-      desc: "어떤 조건일 때 D+1, D+2가 좋았는지 패턴 도출" },
-    { id: "theme", icon: "🏷️", label: "테마별 성과 비교", color: C.usMid, bg: C.usLight,
-      desc: "각 테마의 평균 상승률·승률 비교 및 강한 테마 추천" },
-    { id: "stock", icon: "📊", label: "종목별 히스토리 분석", color: "#8060a0", bg: "#f0e8f8",
-      desc: "종목별 반복 패턴·특이점 및 집중 추천 종목 도출" },
-    { id: "rule", icon: "📋", label: "매매 규칙 검증", color: "#b09020", bg: C.yellow2,
-      desc: "현재 매매 원칙이 실제 데이터와 얼마나 부합하는지 검증" },
-    { id: "ipo", icon: "🌸", label: "공모주 성과 분석", color: "#2a9d8f", bg: C.mint2,
-      desc: "증권사별·섹터별 공모주 수익률 패턴 분석" },
-    { id: "us", icon: "🇺🇸", label: "미국주식 포트폴리오 진단", color: C.usBlue, bg: "#e8f0f8",
-      desc: "미국주식 관심 종목 구성·테마 집중도·리스크 진단" },
-  ];
+function computeStats(trades) {
+  const closed  = trades.filter((t) => t.exit != null);
+  const pnl     = (t) => (t.exit - t.entry) * t.shares;
+  const results = closed.map(pnl);
+  const wins    = results.filter((r) => r > 0);
+  const losses  = results.filter((r) => r < 0);
+  const winRate    = closed.length ? (wins.length / closed.length) * 100 : 0;
+  const avgWin     = wins.length   ? wins.reduce((a,b)=>a+b,0) / wins.length : 0;
+  const avgLoss    = losses.length ? Math.abs(losses.reduce((a,b)=>a+b,0) / losses.length) : 0;
+  const payoff     = avgLoss ? avgWin / avgLoss : null;
+  const expectancy = closed.length ? results.reduce((a,b)=>a+b,0) / closed.length : 0;
+  const totalPnl   = results.reduce((a,b)=>a+b,0);
+  const followed   = closed.filter((t) => t.exit >= t.stop).length;
+  const compliance = closed.length ? (followed / closed.length) * 100 : 0;
+  return { n: closed.length, winRate, avgWin, avgLoss, payoff, expectancy, totalPnl, compliance };
+}
 
-  const buildPrompt = (mode) => {
-    const krSummary = krRecords.map(r => {
-      const ratio = r.tradingAmt && r.tradingAmt20 ? (r.tradingAmt / r.tradingAmt20).toFixed(1) : null;
-      return `[${r.date}] ${r.stock}(${getThemes(r).join(",")}) | 상승률:${r.change}% | 거래대금배수:${ratio||"?"}x | 기관:${r.instFlow?r.instFlowType+fmtMillion(r.instFlow):"없음"} | 외인:${r.foreignFlow?r.foreignFlowType+fmtMillion(r.foreignFlow):"없음"} | 52주고점比:${r.high52wPct??"-"}% | D+1:${r.d1Change??"-"}% | D+2:${r.d2Change??"-"}% | 이유:${r.reason||""}`;
-    }).join("\n");
+// ─────────────────────────────────────────────────────────────
+// 4. 종목 체크 계산 로직 (검증 완료)
+// ─────────────────────────────────────────────────────────────
+const sma = (v, n) => v.length >= n ? v.slice(-n).reduce((a,b)=>a+b,0)/n : null;
 
-    const usSummary = usCards.map(c =>
-      `${c.stock}(${c.ticker}) | 테마:${getThemes(c).join(",")} | 시총:${fmtUSD(c.marketCapUSD||0)} | 현재:$${c.currentPrice||"-"} | 목표:$${c.targetPrice||"-"} | 종료:${c.closedReason?"Y":"N"} | 이유:${c.reason||""}`
-    ).join("\n");
+function rsiCalc(c, n = 14) {
+  if (c.length < n + 1) return null;
+  let g = 0, l = 0;
+  for (let i = c.length - n; i < c.length; i++) {
+    const d = c[i] - c[i-1];
+    if (d > 0) g += d; else l += -d;
+  }
+  g /= n; l /= n;
+  if (l === 0) return 100;
+  return Math.round((100 - 100 / (1 + g/l)) * 10) / 10;
+}
 
-    const ipoSummary = ipoRecords.filter(r => r.sellPrice).map(r => {
-      const profit = ((Number(r.sellPrice) - Number(r.ipoPrice)) / Number(r.ipoPrice) * 100).toFixed(1);
-      return `${r.name}(${r.broker}) | 공모가:${Number(r.ipoPrice).toLocaleString()}원 | 매도가:${Number(r.sellPrice).toLocaleString()}원 | 수익률:${profit}%`;
-    }).join("\n");
+function bbWidth(c, n = 20, k = 2) {
+  if (c.length < n) return null;
+  const w = c.slice(-n), m = w.reduce((a,b)=>a+b,0)/n;
+  const sd = Math.sqrt(w.reduce((a,b)=>a+(b-m)**2,0)/n);
+  return Math.round((2*k*sd)/m*10000)/100;
+}
 
-    const baseContext = `
-당신은 서현의 주식 데이터를 분석하는 전문 투자 분석가입니다.
-서현의 투자 스타일: 단기매매(1~3일), 대형주 위주, 테마 모멘텀 추종.
+function compressionBars(c, n = 20, th = 8, look = 40) {
+  let cnt = 0;
+  for (let end = c.length; end > Math.max(n, c.length-look); end--) {
+    const w = bbWidth(c.slice(0,end), n);
+    if (w !== null && w <= th) cnt++; else break;
+  }
+  return cnt;
+}
 
-=== 국내주식 기록 (총 ${krRecords.length}건) ===
-${krSummary}
+function atrCalc(h, l, c, n = 14) {
+  if (c.length < n + 1) return null;
+  let s = 0;
+  for (let i = c.length-n; i < c.length; i++)
+    s += Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1]));
+  return Math.round(s/n*100)/100;
+}
 
-=== 미국주식 관심종목 (총 ${usCards.length}건) ===
-${usSummary}
+function analyze(ohlcv) {
+  const c = ohlcv.map(b=>b.c), h = ohlcv.map(b=>b.h), l = ohlcv.map(b=>b.l);
+  const price = c[c.length-1];
+  const ma20 = sma(c,20), ma60 = sma(c,60);
+  const r = rsiCalc(c), bw = bbWidth(c), comp = compressionBars(c), a = atrCalc(h,l,c);
+  const sl      = Math.min(...l.slice(-20));
+  const loLow   = Math.min(...l.slice(-60));
+  const hi60    = Math.max(...c.slice(-60));
+  const fromLow  = Math.round((price/loLow-1)*1000)/10;
+  const fromHigh = Math.round((price/hi60-1)*1000)/10;
+  const trendOk  = ma60 != null && price > ma60 && ma20 != null && ma20 > ma60;
+  const overbought = r != null && r >= 70;
+  const chased     = fromLow >= 30;
+  const stops = {
+    "60일선":    ma60 ? Math.round(ma60) : null,
+    "직전저점":   Math.round(sl),
+    "ATR×2":    a ? Math.round(price - 2*a) : null,
+    "−8% 고정":  Math.round(price * 0.92),
+  };
+  const flags = [];
+  if (!trendOk)   flags.push({ t: "추세 깨짐 → 패스",           lv: "bad"  });
+  if (overbought) flags.push({ t: `RSI ${r} 과매수`,            lv: "warn" });
+  if (chased)     flags.push({ t: `저점대비 +${fromLow}% 추격`, lv: "warn" });
+  if (comp >= 9)  flags.push({ t: `응축 ${comp}봉 코일`,        lv: "ok"   });
+  const pass = trendOk && !overbought && !chased;
+  return { price, ma20: ma20?Math.round(ma20):null, ma60: ma60?Math.round(ma60):null,
+           trendOk, rsi: r, bw, comp, fromHigh, fromLow, stops, atr: a, flags, pass };
+}
 
-=== 공모주 기록 (매도완료 ${ipoRecords.filter(r=>r.sellPrice).length}건) ===
-${ipoSummary}
+// ─────────────────────────────────────────────────────────────
+// 5. KIS 연결 레이어 (연결 방법에 따라 주석 해제)
+// ─────────────────────────────────────────────────────────────
+async function fetchOhlcv(code) {
+  try {
+    const res = await fetch(`http://140.83.51.201:5000/api/ohlcv?code=${code}&count=60`);
+    if (res.ok) {
+      const json = await res.json();
+      if (json.data && json.data.length > 0) return json.data;
+    }
+  } catch(e) { console.error('OHLCV fetch error:', e); }
+  return null;
+}
 
-=== 현재 매매 원칙 ===
-매수: ${principle.buy}
-매도: ${principle.sell}
-`;
+// ─────────────────────────────────────────────────────────────
+// 6. 데모 OHLCV
+// ─────────────────────────────────────────────────────────────
+const bar = (c) => ({ o:c, h:c+Math.max(1,c*0.01), l:c-Math.max(1,c*0.01), c });
+const DEMO_DATA = {
+  급등주:   Array.from({length:90},(_,i)=>bar(50+i*1.6)),
+  추세이탈: Array.from({length:90},(_,i)=>bar(i<60?100+i:160-(i-60)*2.2)),
+  응축셋업: Array.from({length:90},(_,i)=>bar(i<50?60+i*0.9:104+Math.sin(i)*0.8)),
+  우상향:   Array.from({length:90},(_,i)=>bar(85+i*0.28+Math.sin(i/3)*2.5)),
+};
+const DEMOS = [
+  {key:"급등주",   name:"급등주 사례"},
+  {key:"추세이탈", name:"추세이탈 사례"},
+  {key:"응축셋업", name:"응축셋업 사례"},
+  {key:"우상향",   name:"우상향 사례"},
+];
 
-    const prompts = {
-      pattern: baseContext + `
-위 국내주식 데이터를 분석해서 다음을 알려주세요:
-1. **승률 패턴 분석**: D+1, D+2가 양수인 경우와 음수인 경우를 나눠서, 어떤 조건(거래대금배수, 기관/외인 수급, 상승률 크기, 52주 고점 거리)이 공통적으로 나타나는지 찾아주세요.
-2. **최고 성과 조건**: 가장 수익이 좋았던 조건 조합 TOP 3
-3. **위험 신호**: 손실이 났던 공통 패턴
-4. **실행 가능한 매수 체크리스트**: 위 분석을 바탕으로 구체적인 조건 3~5가지
+// ─────────────────────────────────────────────────────────────
+// 7. 공통 UI 컴포넌트
+// ─────────────────────────────────────────────────────────────
+function Card({ title, sub, children, style }) {
+  return (
+    <section style={{ background:C.card, borderRadius:18, padding:18,
+                      marginBottom:12, boxShadow:"0 1px 3px rgba(0,0,0,.05)", ...style }}>
+      {(title || sub) && (
+        <div style={{ display:"flex", alignItems:"baseline", gap:8, marginBottom:14, flexWrap:"wrap" }}>
+          {title && <span style={{ fontSize:15, fontWeight:800, letterSpacing:"-0.01em" }}>{title}</span>}
+          {sub   && <span style={{ fontSize:11.5, color:C.sub, fontWeight:500 }}>{sub}</span>}
+        </div>
+      )}
+      {children}
+    </section>
+  );
+}
 
-결과는 명확한 숫자와 함께 실용적으로 작성해주세요.`,
+function Field({ label, children }) {
+  return (
+    <div style={{ marginBottom:12 }}>
+      <div style={{ fontSize:12.5, color:C.sub, marginBottom:6, fontWeight:600 }}>{label}</div>
+      {children}
+    </div>
+  );
+}
 
-      theme: baseContext + `
-테마별로 성과를 분석해주세요:
-1. **테마별 평균 성과표**: 각 테마의 평균 상승률, D+1 평균, D+2 평균, 승률(%) 
-2. **핫 테마 vs 식은 테마**: 현재 기준으로 모멘텀이 살아있는 테마와 주의할 테마
-3. **테마 조합 인사이트**: 여러 테마가 겹친 종목의 성과 특성
-4. **다음 집중할 테마 추천**: 근거와 함께 1~2개 추천
+function StatRow({ k, v, note, big, color }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                  padding:"9px 0", borderBottom:`1px solid ${C.bg}` }}>
+      <span style={{ fontSize:13.5, color:C.sub, fontWeight:500 }}>{k}</span>
+      <span style={{ textAlign:"right" }}>
+        <span style={{ fontSize: big?22:15, fontWeight: big?800:700,
+                       letterSpacing: big?"-0.02em":undefined, color: color||C.text }}>{v}</span>
+        {note && <div style={{ fontSize:11, color:C.sub, marginTop:2, fontWeight:500 }}>{note}</div>}
+      </span>
+    </div>
+  );
+}
 
-숫자 중심으로 간결하게 작성해주세요.`,
+function DataRow({ k, v, color, note }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                  padding:"9px 0", borderBottom:`1px solid ${C.bg}` }}>
+      <span style={{ fontSize:13.5, color:C.sub, fontWeight:500 }}>{k}</span>
+      <span style={{ fontSize:15, fontWeight:700, color: color||C.text }}>
+        {v}{note && <span style={{ fontSize:11.5, fontWeight:700, color:T.warn, marginLeft:4 }}>{note}</span>}
+      </span>
+    </div>
+  );
+}
 
-      stock: baseContext + `
-종목별 패턴을 분석해주세요:
-1. **반복 등장 종목 분석**: 여러 번 기록된 종목의 패턴 (언제 좋고 언제 나빴는지)
-2. **종목별 특성 정리**: 각 종목의 강점/약점 1줄 요약
-3. **집중 추천 종목**: 현재까지 데이터 기준으로 가장 좋은 성과를 보인 종목과 이유
-4. **주의 종목**: 반복적으로 아쉬운 결과가 나온 종목
+function Input({ style, ...props }) {
+  return (
+    <input style={{ width:"100%", padding:"12px 13px", border:`1px solid ${C.border}`,
+                    borderRadius:11, fontSize:16, fontWeight:600, background:C.card,
+                    transition:"border-color .15s", ...style }} {...props} />
+  );
+}
 
-실용적인 결론 중심으로 써주세요.`,
+function Btn({ children, primary, danger, disabled, onClick, style }) {
+  const base = { padding:"13px 0", border:"none", borderRadius:13, fontWeight:800,
+                 fontSize:15.5, width:"100%", transition:"opacity .15s", ...style };
+  const variant = primary  ? { background:C.text, color:"#fff" }
+                : danger   ? { background:"#FEF2F2", color:T.warn }
+                : { background:C.bg, color:C.sub };
+  return (
+    <button style={{ ...base, ...variant, ...(disabled?{background:C.border,color:C.sub}:{}) }}
+            disabled={disabled} onClick={onClick}>{children}</button>
+  );
+}
 
-      rule: baseContext + `
-현재 매매 원칙을 실제 데이터로 검증해주세요:
-1. **원칙 부합률**: 각 매수/매도 원칙이 실제 기록에서 얼마나 지켜졌는지 (%)
-2. **원칙 지켰을 때 vs 안 지켰을 때**: 성과 차이 비교
-3. **원칙의 유효성**: 각 원칙이 실제 수익에 도움이 됐는지 평가
-4. **원칙 개선 제안**: 데이터 기반으로 추가하거나 수정할 원칙 2~3가지
+function SmallBtn({ children, onClick, disabled, color }) {
+  return (
+    <button onClick={onClick} disabled={disabled}
+            style={{ padding:"9px 13px", border:"none", borderRadius:10, fontWeight:700,
+                     fontSize:13.5, background: color==="blue"?"#E8F0FE":C.bg,
+                     color: color==="blue"?T.down:C.sub }}>
+      {children}
+    </button>
+  );
+}
 
-솔직하고 냉정하게 평가해주세요.`,
+function Metric({ k, v, hint, color }) {
+  return (
+    <div style={{ background:"#F8F9FA", borderRadius:13, padding:"13px 14px" }}>
+      <div style={{ fontSize:12, color:C.sub, fontWeight:600, marginBottom:5 }}>{k}</div>
+      <div style={{ fontSize:19, fontWeight:800, letterSpacing:"-0.02em", color:color||C.text }}>{v}</div>
+      {hint && <div style={{ fontSize:10.5, color:C.sub, marginTop:3, fontWeight:500 }}>{hint}</div>}
+    </div>
+  );
+}
 
-      ipo: baseContext + `
-공모주 기록을 분석해주세요:
-1. **전체 성과 요약**: 총 수익, 평균 수익률, 승률
-2. **증권사별 성과**: 어느 증권사에서 가장 좋은 결과가 나왔는지
-3. **패턴 발견**: 상장일 당일 매도 vs 보유 중 어느 전략이 더 효과적이었는지
-4. **손실 케이스 분석**: 공모가 하회 패턴이 있다면 어떤 특징인지
-5. **공모주 전략 개선안**: 데이터 기반 추천 전략
+// ─────────────────────────────────────────────────────────────
+// 8. 매매 플랜 탭
+// ─────────────────────────────────────────────────────────────
+const DEFAULT_SETTINGS = { account:50000000, riskPct:1.5, maxWeightPct:20 };
 
-구체적인 금액과 수익률 수치와 함께 분석해주세요.`,
+export function TradePlanTab() {
+  const [view,     setView]     = useState("plan");   // plan | journal | stats
+  const [market,   setMarket]   = useState("KR");
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [journal,  setJournal]  = useState([]);
+  const [loaded,   setLoaded]   = useState(false);
 
-      us: baseContext + `
-미국주식 관심 종목 포트폴리오를 진단해주세요:
-1. **포트폴리오 구성 분석**: 테마 집중도, 시총 분포, 리스크 분산 정도
-2. **현재가 vs 목표가 갭 분석**: 업사이드가 가장 큰 종목과 이미 목표에 근접한 종목
-3. **52주 포지션 분석**: 고점 대비 위치 기준 매수 타이밍 관점 분석
-4. **실적 시즌 대비**: 곧 실적 발표 예정 종목 주목 포인트
-5. **포트폴리오 개선 제안**: 추가·제거·비중 조정 관점에서 제안
+  const [name,    setName]    = useState("");
+  const [entry,   setEntry]   = useState("");
+  const [stop,    setStop]    = useState("");
+  const [ma60v,   setMa60v]   = useState("");
+  const [swingv,  setSwingv]  = useState("");
+  const [atrv,    setAtrv]    = useState("");
+  const [trendOk, setTrendOk] = useState(false);
+  const [exitDraft, setExitDraft] = useState({});
 
-투자 전략적 관점에서 실용적으로 작성해주세요.`,
+  useEffect(() => {
+    (async () => {
+      setSettings(await storageGet(KEY_SETTINGS, DEFAULT_SETTINGS));
+      setJournal(await storageGet(KEY_JOURNAL, []));
+      setLoaded(true);
+    })();
+  }, []);
+  useEffect(() => { if (loaded) storageSet(KEY_SETTINGS, settings); }, [settings, loaded]);
+  useEffect(() => { if (loaded) storageSet(KEY_JOURNAL,  journal);  }, [journal,  loaded]);
+
+  const entryN = parseFloat(entry) || 0;
+  const stopN  = parseFloat(stop)  || 0;
+  const plan   = useMemo(
+    () => computeRiskPlan({ ...settings, entry:entryN, stop:stopN }),
+    [settings, entryN, stopN]
+  );
+  const canLog    = !plan.error && plan.shares > 0 && trendOk;
+  const filtered  = journal.filter(t => t.market === market);
+  const stats     = useMemo(() => computeStats(filtered), [filtered]);
+  const statsAll  = useMemo(() => computeStats(journal),  [journal]);
+
+  const setStopByPct = (p) => { if (entryN>0) setStop(String(Math.round(entryN*(1-p/100)))); };
+
+  const logTrade = () => {
+    if (!canLog) return;
+    const t = {
+      id: Date.now(), market, name: name||"(이름없음)",
+      entry: entryN, stop: stopN, shares: plan.shares, cost: plan.cost,
+      plannedLoss: plan.maxLoss, stopPct: plan.stopPctVal, weightPct: plan.weightPct,
+      date: new Date().toISOString().slice(0,10), exit:null, exitDate:null,
     };
-    return prompts[mode];
+    setJournal([t, ...journal]);
+    setName(""); setEntry(""); setStop(""); setMa60v(""); setSwingv(""); setAtrv(""); setTrendOk(false);
+    setView("journal");
   };
 
-  const runAnalysis = async (mode) => {
-    setActiveMode(mode);
+  const closeTrade = (id) => {
+    const ex = parseFloat(exitDraft[id]);
+    if (!(ex>0)) return;
+    setJournal(journal.map(t => t.id===id ? {...t,exit:ex,exitDate:new Date().toISOString().slice(0,10)} : t));
+    setExitDraft({...exitDraft,[id]:""});
+  };
+  const removeTrade = (id) => setJournal(journal.filter(t=>t.id!==id));
+
+  const seg_style = (active) => ({
+    flex:1, padding:"9px 0", border:"none", borderRadius:10, fontWeight:700, fontSize:14,
+    background: active?C.text:C.border, color: active?"#fff":C.sub, transition:"all .15s",
+  });
+  const tab_style = (active) => ({
+    flex:1, padding:"10px 0", border:"none", background:"transparent", fontWeight:700, fontSize:14,
+    color: active?C.text:C.sub, borderBottom: active?`2px solid ${C.text}`:"2px solid transparent",
+  });
+
+  return (
+    <div style={{ fontFamily:"Pretendard,'Apple SD Gothic Neo',sans-serif", background:C.bg, minHeight:"100vh", color:C.text,
+                  fontVariantNumeric:"tabular-nums", paddingBottom:32 }}>
+
+      {/* 헤더 */}
+      <div style={{ padding:"24px 20px 12px" }}>
+        <div style={{ fontSize:22, fontWeight:800, letterSpacing:"-0.02em" }}>
+          매매 플랜<span style={{ color:T.down }}>.</span>
+        </div>
+        <div style={{ fontSize:12.5, color:C.sub, marginTop:4, fontWeight:500 }}>
+          예측하지 않는다 · 손절과 수량을 먼저 정한다
+        </div>
+      </div>
+
+      {/* 국장/미장 토글 */}
+      <div style={{ display:"flex", gap:6, padding:"0 20px", marginBottom:8 }}>
+        {[["KR","국장"],["US","미장"]].map(([k,label])=>(
+          <button key={k} onClick={()=>setMarket(k)} style={seg_style(market===k)}>{label}</button>
+        ))}
+      </div>
+
+      {/* 뷰 탭 */}
+      <nav style={{ display:"flex", gap:4, padding:"4px 16px 0", borderBottom:`1px solid ${C.border}`,
+                    background:C.card }}>
+        {[["plan","진입 플랜"],["journal",`일지${filtered.length?` (${filtered.length})`:""}`],["stats","통계"]].map(([k,label])=>(
+          <button key={k} onClick={()=>setView(k)} style={tab_style(view===k)}>{label}</button>
+        ))}
+      </nav>
+
+      <div style={{ padding:"12px 16px 0" }}>
+
+        {/* ── 진입 플랜 ── */}
+        {view==="plan" && (
+          <>
+            <Card title="설정" sub="한 번만 정하고 가끔 수정">
+              <Field label="계좌 규모 (원)">
+                <Input inputMode="numeric" value={settings.account}
+                  onChange={e=>setSettings({...settings,account:parseFloat(e.target.value)||0})} />
+              </Field>
+              <div style={{ display:"flex", gap:10 }}>
+                <Field label="트레이드당 리스크 %">
+                  <Input inputMode="decimal" value={settings.riskPct}
+                    onChange={e=>setSettings({...settings,riskPct:parseFloat(e.target.value)||0})} />
+                </Field>
+                <Field label="종목당 비중 상한 %">
+                  <Input inputMode="decimal" value={settings.maxWeightPct}
+                    onChange={e=>setSettings({...settings,maxWeightPct:parseFloat(e.target.value)||0})} />
+                </Field>
+              </div>
+            </Card>
+
+            <Card title="진입 입력" sub="네가 정하는 것: 종목 · 진입가 · 손절가">
+              <Field label="종목명">
+                <Input value={name} placeholder="예: LIG넥스원"
+                  onChange={e=>setName(e.target.value)} />
+              </Field>
+              <Field label="진입가 (원)">
+                <Input inputMode="numeric" value={entry} placeholder="50000"
+                  onChange={e=>setEntry(e.target.value)} />
+              </Field>
+              <Field label="손절가 (원) — 네 유일한 판단">
+                <Input inputMode="numeric" value={stop} placeholder="46000"
+                  onChange={e=>setStop(e.target.value)} />
+              </Field>
+
+              {/* 손절 후보 */}
+              <div style={{ fontSize:12.5, color:C.sub, fontWeight:600, margin:"6px 0 8px" }}>
+                손절 후보 — 골라서 적용
+              </div>
+              <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+                {[8,10,12].map(p=>(
+                  <button key={p} disabled={!entryN} onClick={()=>setStopByPct(p)}
+                    style={{ flex:1, padding:"9px 0", border:`1px solid ${C.border}`, borderRadius:9,
+                             background:C.card, fontWeight:700, fontSize:14, color:C.text }}>
+                    −{p}%
+                  </button>
+                ))}
+              </div>
+              <div style={{ fontSize:11, color:C.sub, marginBottom:8, fontWeight:500 }}>
+                아래 3개는 앱 통합 시 KIS가 자동으로 채움 (지금은 수동 입력)
+              </div>
+              {[["60일선",ma60v,setMa60v],["직전 저점",swingv,setSwingv],["ATR 손절",atrv,setAtrv]].map(([lab,val,set])=>(
+                <div key={lab} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                  <span style={{ width:74, fontSize:13, color:C.sub, fontWeight:600 }}>{lab}</span>
+                  <input inputMode="numeric" value={val} placeholder="가격"
+                    onChange={e=>set(e.target.value)}
+                    style={{ flex:1, padding:"10px 12px", border:`1px solid ${C.border}`, borderRadius:10,
+                             fontSize:15, fontWeight:600, fontFamily:"Pretendard,'Apple SD Gothic Neo',sans-serif" }} />
+                  <SmallBtn color="blue" disabled={!(parseFloat(val)>0)} onClick={()=>setStop(val)}>적용</SmallBtn>
+                </div>
+              ))}
+            </Card>
+
+            <Card title="리스크 플랜" sub="수량은 자동 — 손절·리스크에서 역산">
+              {plan.error
+                ? <div style={{ color:C.sub, fontSize:14, padding:"8px 0" }}>{plan.error}</div>
+                : <>
+                    {plan.overLossCap && (
+                      <div style={{ background:"#FEF2F2", color:T.warn, padding:"11px 13px",
+                                    borderRadius:11, fontSize:13, fontWeight:600, marginBottom:12, lineHeight:1.45 }}>
+                        ⚠ 손절폭 {plan.stopPctVal.toFixed(1)}% — 손실 한도(−12%) 초과.
+                        더 타이트하게 잡거나 이 진입은 건너뛰길 권해.
+                      </div>
+                    )}
+                    <StatRow k="손절폭" v={`${won(plan.stopDist)} (${plan.stopPctVal.toFixed(1)}%)`} />
+                    <StatRow k="리스크 한도" v={won(plan.riskAmount)} />
+                    <StatRow k="최대 매수 수량" v={`${plan.shares.toLocaleString()}주`} big
+                      note={plan.limitedBy==="weight"?"비중 상한에 의해 제한됨":"리스크 한도에 의해 결정됨"} />
+                    <StatRow k="투자금" v={won(plan.cost)} />
+                    <StatRow k="최대 손실 (손절 시)" v={won(plan.maxLoss)} color={T.down} />
+                    <StatRow k="계좌 내 비중" v={`${plan.weightPct.toFixed(1)}%`}
+                      color={plan.weightPct>settings.maxWeightPct+0.01?T.up:undefined} />
+                  </>
+              }
+            </Card>
+
+            <Card title="진입 체크" sub="통과해야 기록 가능">
+              <label style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 0",
+                              fontSize:14, fontWeight:500, color:C.text, lineHeight:1.4 }}>
+                <input type="checkbox" checked={trendOk} onChange={e=>setTrendOk(e.target.checked)} />
+                <span>추세 위에 있다 (60일선 위 / 정배열) — 역추세 매수 아님</span>
+              </label>
+              {[
+                [!plan.error && stopN>0,  "손절선 정함",            "— 미설정"],
+                [!plan.error && !plan.overLossCap, "손실 한도(−12%) 이내", "— 초과"],
+              ].map(([ok,yes,no],i)=>(
+                <label key={i} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 0",
+                                        fontSize:14, fontWeight:500, color:C.sub, lineHeight:1.4 }}>
+                  <input type="checkbox" checked={ok} readOnly />
+                  <span>{ok ? yes+" ✓" : yes+" "+no}</span>
+                </label>
+              ))}
+              <div style={{ marginTop:4 }}>
+                <Btn primary disabled={!canLog} onClick={logTrade}>
+                  {canLog ? "이 계획대로 기록하기" : "손절 + 추세 체크가 필요해"}
+                </Btn>
+              </div>
+            </Card>
+          </>
+        )}
+
+        {/* ── 일지 ── */}
+        {view==="journal" && (
+          <>
+            {filtered.length===0 && (
+              <div style={{ textAlign:"center", color:C.sub, padding:"60px 20px",
+                            fontSize:14.5, lineHeight:1.6, fontWeight:500 }}>
+                아직 {market==="KR"?"국장":"미장"} 기록이 없어.<br />
+                진입 플랜에서 첫 매매를 기록해봐.
+              </div>
+            )}
+            {filtered.map(t=>{
+              const open     = t.exit==null;
+              const realized = open ? null : (t.exit-t.entry)*t.shares;
+              const retPct   = open ? null : ((t.exit-t.entry)/t.entry)*100;
+              const followed = !open && t.exit>=t.stop;
+              return (
+                <div key={t.id} style={{ background:C.card, borderRadius:16, padding:16,
+                                         marginBottom:10, boxShadow:"0 1px 2px rgba(0,0,0,.04)" }}>
+                  <div style={{ display:"flex", justifyContent:"space-between",
+                                alignItems:"flex-start", marginBottom:10 }}>
+                    <div>
+                      <div style={{ fontSize:16, fontWeight:800 }}>{t.name}</div>
+                      <div style={{ fontSize:12, color:C.sub, marginTop:3, fontWeight:500 }}>
+                        {t.date} · {t.shares}주 @ {won(t.entry)}
+                      </div>
+                    </div>
+                    {open
+                      ? <span style={{ fontSize:12, fontWeight:700, color:C.sub,
+                                       background:C.bg, borderRadius:8, padding:"4px 9px" }}>보유중</span>
+                      : <span style={{ fontSize:14, fontWeight:800, border:`1.5px solid`,
+                                       borderColor:pnlColor(realized), borderRadius:8, padding:"3px 8px",
+                                       color:pnlColor(realized) }}>{pct(retPct)}</span>
+                    }
+                  </div>
+                  <div style={{ display:"flex", gap:14, fontSize:12.5, color:C.sub,
+                                fontWeight:500, marginBottom:10, flexWrap:"wrap" }}>
+                    <span>손절가 {won(t.stop)} ({t.stopPct?.toFixed(1)}%)</span>
+                    <span>계획손실 {won(t.plannedLoss)}</span>
+                  </div>
+                  {open ? (
+                    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                      <input inputMode="numeric" placeholder="매도가"
+                        value={exitDraft[t.id]||""} onChange={e=>setExitDraft({...exitDraft,[t.id]:e.target.value})}
+                        style={{ flex:1, padding:"10px 12px", border:`1px solid ${C.border}`, borderRadius:10,
+                                 fontSize:15, fontWeight:600, fontFamily:"Pretendard,'Apple SD Gothic Neo',sans-serif" }} />
+                      <SmallBtn color="blue" onClick={()=>closeTrade(t.id)}>청산</SmallBtn>
+                      <SmallBtn onClick={()=>removeTrade(t.id)}>삭제</SmallBtn>
+                    </div>
+                  ) : (
+                    <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+                      <span style={{ color:pnlColor(realized), fontWeight:700 }}>
+                        {realized>=0?"+":""}{won(realized)}
+                      </span>
+                      <span style={{ fontSize:11.5, fontWeight:700, borderRadius:7, padding:"4px 8px",
+                                     background:followed?"#EAF6EE":"#FEF2F2",
+                                     color:followed?T.green:T.warn }}>
+                        {followed?"손절 준수":"손절선 이탈 (규칙 위반)"}
+                      </span>
+                      <SmallBtn onClick={()=>removeTrade(t.id)}>삭제</SmallBtn>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
+
+        {/* ── 통계 ── */}
+        {view==="stats" && (
+          <>
+            <Card title={`${market==="KR"?"국장":"미장"} 통계`} sub={`청산 ${stats.n}건 기준`}>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:6 }}>
+                <Metric k="승률" v={stats.n ? stats.winRate.toFixed(0)+"%" : "—"} />
+                <Metric k="손익비" v={stats.payoff!=null ? stats.payoff.toFixed(2) : "—"}
+                  hint={stats.payoff!=null&&stats.payoff<1?"1 미만 = 손실이 더 큼":""}
+                  color={stats.payoff!=null?(stats.payoff>=1?T.up:T.down):undefined} />
+                <Metric k="거래당 기대값" v={stats.n?won(stats.expectancy):"—"} color={pnlColor(stats.expectancy)} />
+                <Metric k="총 실현손익"   v={stats.n?won(stats.totalPnl):"—"}   color={pnlColor(stats.totalPnl)} />
+                <Metric k="평균 이익" v={won(stats.avgWin)}  color={T.up} />
+                <Metric k="평균 손실" v={won(-stats.avgLoss)} color={T.down} />
+              </div>
+              {/* 손절 준수율 */}
+              <div style={{ marginTop:14, padding:14, background:"#F8F9FA", borderRadius:13 }}>
+                <div style={{ fontSize:12.5, color:C.text, fontWeight:700, marginBottom:8 }}>
+                  규칙 준수율 (손절선 지킨 비율)
+                </div>
+                <div style={{ height:8, background:C.border, borderRadius:99, overflow:"hidden" }}>
+                  <div style={{ height:"100%", borderRadius:99, transition:"width .4s",
+                                width:`${stats.compliance}%`,
+                                background:stats.compliance>=80?T.up:T.down }} />
+                </div>
+                <div style={{ fontSize:20, fontWeight:800, marginTop:6 }}>
+                  {stats.n ? stats.compliance.toFixed(0)+"%" : "—"}
+                </div>
+                <div style={{ fontSize:11.5, color:C.sub, marginTop:4, fontWeight:500, lineHeight:1.45 }}>
+                  이게 진짜 KPI야. 4월(+)과 5월(−)을 가른 건 종목이 아니라 이 숫자였어.
+                </div>
+              </div>
+            </Card>
+
+            <Card title="전체 합산" sub="국장 + 미장">
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                <Metric k="기대값"   v={statsAll.n?won(statsAll.expectancy):"—"} color={pnlColor(statsAll.expectancy)} />
+                <Metric k="총 손익"  v={statsAll.n?won(statsAll.totalPnl):"—"}   color={pnlColor(statsAll.totalPnl)} />
+                <Metric k="준수율"   v={statsAll.n?statsAll.compliance.toFixed(0)+"%":"—"} />
+                <Metric k="청산 건수" v={statsAll.n+"건"} />
+              </div>
+            </Card>
+          </>
+        )}
+
+      </div>
+      <div style={{ textAlign:"center", fontSize:11, color:C.sub, padding:"8px 20px 28px", fontWeight:500 }}>
+        프로토타입 · 60일선/직전저점/수급은 앱 통합 시 KIS 자동연동
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// 9. 종목 체크 탭
+// ─────────────────────────────────────────────────────────────
+export function StockCheckTab() {
+  const [q,       setQ]       = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result,  setResult]  = useState(null);
+  // result: { name, data:ohlcv[]|null, notFound:bool }
+
+  const runAnalysis = useCallback(async (name, ohlcv) => {
+    setResult({ name, data: ohlcv, notFound: !ohlcv });
+  }, []);
+
+  const search = async () => {
+    const q2 = q.trim();
+    if (!q2) return;
     setLoading(true);
     setResult(null);
-    setError(null);
-
-    const prompt = buildPrompt(mode);
-
     try {
-      const res = await fetch("/.netlify/functions/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
-
-      // status 확인
-      if (!res.ok) {
-        setError(`HTTP 오류: ${res.status} ${res.statusText}`);
-        return;
-      }
-
-      const data = await res.json();
-
-      if (data.error) {
-        setError("오류: " + data.error);
-        return;
-      }
-
-      const text = data.text || "";
-
-      if (text) {
-        setResult({ mode, text });
-      } else {
-        setError("응답에 텍스트가 없어요.");
-      }
-    } catch (e) {
-      // fetch 실패 또는 JSON 파싱 실패
-      const msg = e?.message || String(e);
-      if (msg.includes("Invalid response format")) {
-        // Artifact 환경 특수 처리: 직접 메시지 API 재시도
-        setError("Artifact 환경 제한으로 API 호출이 차단됐어요. Netlify 배포 앱에서는 정상 작동해요.");
-      } else {
-        setError(`오류: ${msg}`);
-      }
-    } finally {
-      setLoading(false);
-    }
+      // 1. 실제 KIS 연결 시도
+      const ohlcv = await fetchOhlcv(q2);
+      if (ohlcv) { await runAnalysis(q2, ohlcv); return; }
+      // 2. 데모에서 찾기
+      const hit = DEMOS.find(d => d.name.includes(q2) || d.key.includes(q2));
+      await runAnalysis(q2, hit ? DEMO_DATA[hit.key] : null);
+    } finally { setLoading(false); }
   };
 
-  const modeInfo = MODES.find(m => m.id === activeMode);
+  const pickDemo = async (d) => {
+    setQ(d.name); setLoading(true); setResult(null);
+    try { await runAnalysis(d.name, DEMO_DATA[d.key]); }
+    finally { setLoading(false); }
+  };
 
-  // 마크다운 간단 렌더링
+  const r = result?.data ? analyze(result.data) : null;
+
+  return (
+    <div style={{ fontFamily:"Pretendard,'Apple SD Gothic Neo',sans-serif", background:C.bg, minHeight:"100vh", color:C.text,
+                  fontVariantNumeric:"tabular-nums", paddingBottom:32 }}>
+
+      {/* 헤더 */}
+      <div style={{ padding:"24px 20px 12px" }}>
+        <div style={{ fontSize:22, fontWeight:800, letterSpacing:"-0.02em" }}>
+          종목 체크<span style={{ color:T.down }}>.</span>
+        </div>
+        <div style={{ fontSize:12.5, color:C.sub, marginTop:4, fontWeight:500 }}>
+          사기 전에 — 거르고 · 경고하고 · 손절을 쥐여준다
+        </div>
+      </div>
+
+      {/* 검색 */}
+      <div style={{ display:"flex", gap:8, padding:"4px 16px 8px" }}>
+        <input value={q} placeholder="종목명 / 종목코드"
+          onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&search()}
+          style={{ flex:1, padding:"13px 14px", border:`1px solid ${C.border}`, borderRadius:12,
+                   fontSize:15.5, fontWeight:600, background:C.card, fontFamily:"Pretendard,'Apple SD Gothic Neo',sans-serif" }} />
+        <button onClick={search} disabled={loading}
+          style={{ padding:"0 18px", border:"none", borderRadius:12, background:C.text,
+                   color:"#fff", fontWeight:700, fontSize:15 }}>
+          {loading ? "…" : "검색"}
+        </button>
+      </div>
+
+      {/* 데모 칩 */}
+      <div style={{ display:"flex", gap:7, padding:"2px 16px 10px", flexWrap:"wrap" }}>
+        {DEMOS.map(d=>(
+          <button key={d.key} onClick={()=>pickDemo(d)}
+            style={{ padding:"8px 12px", border:`1px solid ${C.border}`, borderRadius:9,
+                     background:C.card, fontWeight:600, fontSize:12.5, color:C.sub }}>
+            {d.name}
+          </button>
+        ))}
+        <span style={{ fontSize:11.5, color:C.sub, alignSelf:"center", fontWeight:500 }}>
+          KIS 연결 전 데모
+        </span>
+      </div>
+
+      <div style={{ padding:"0 16px" }}>
+
+        {/* 빈 상태 */}
+        {!result && !loading && (
+          <div style={{ textAlign:"center", color:C.sub, padding:"54px 24px",
+                        fontSize:14.5, lineHeight:1.6, fontWeight:500 }}>
+            종목을 검색하거나 데모를 눌러봐.<br />
+            예측이 아니라 "거를지 / 손절 어디"를 알려줘.
+          </div>
+        )}
+
+        {/* 데이터 없음 */}
+        {result?.notFound && (
+          <Card>
+            <div style={{ fontSize:16, fontWeight:800, marginBottom:8 }}>{result.name}</div>
+            <div style={{ color:C.sub, fontSize:14, lineHeight:1.6, fontWeight:500 }}>
+              KIS가 아직 연결 안 됐어.<br />
+              <b>fetchOhlcv()</b> 안의 주석을 해제하면 실제 일봉이 들어와.
+            </div>
+          </Card>
+        )}
+
+        {/* 분석 결과 */}
+        {r && (
+          <>
+            {/* 판정 배너 */}
+            <div style={{ background: r.pass?"#F1F8F3":"#FEF2F2",
+                          border:`1.5px solid ${r.pass?T.green:T.warn}`,
+                          borderRadius:16, padding:"16px 18px", marginBottom:10 }}>
+              <div style={{ fontSize:13, color:C.sub, fontWeight:600 }}>{result.name}</div>
+              <div style={{ fontSize:22, fontWeight:800, letterSpacing:"-0.02em",
+                            color: r.pass?T.green:T.warn, marginTop:3 }}>
+                {r.pass ? "기본 조건 통과" : "걸러 / 주의"}
+              </div>
+              <div style={{ fontSize:12.5, color:C.sub, marginTop:4, fontWeight:500 }}>
+                {r.pass
+                  ? "재무(실적)는 KIS로 확인 · 매수 시 손절 먼저"
+                  : "아래 이유 확인 — 따라사기 / 이탈 자리"}
+              </div>
+            </div>
+
+            {/* 플래그 */}
+            {r.flags.length>0 && (
+              <div style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:10 }}>
+                {r.flags.map((f,i)=>(
+                  <span key={i} style={{ fontSize:12.5, fontWeight:700, borderRadius:8,
+                                         padding:"6px 10px",
+                                         background:f.lv==="ok"?"#EAF6EE":"#FEF2F2",
+                                         color:f.lv==="ok"?T.green:T.warn }}>
+                    {f.t}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* 객관적 사실 */}
+            <Card title="객관적 사실" sub="판정 아님">
+              <DataRow k="현재가"        v={won(r.price)} />
+              <DataRow k="추세"          v={r.trendOk?"정배열 · 살아있음":"이탈 / 꼬임"}
+                color={r.trendOk?T.green:T.down} />
+              <DataRow k="20일선 / 60일선" v={`${won(r.ma20)} / ${won(r.ma60)}`} />
+              <DataRow k="RSI"           v={r.rsi??"—"}
+                color={r.rsi>=70?T.warn:undefined} note={r.rsi>=70?"과매수":""} />
+              <DataRow k="BB폭 / 응축봉" v={`${r.bw??"—"}% / ${r.comp}봉`}
+                color={r.comp>=9?T.green:undefined} />
+              <DataRow k="고점대비 / 저점대비"
+                v={`${r.fromHigh}% / +${r.fromLow}%`}
+                color={r.fromLow>=30?T.warn:undefined} />
+            </Card>
+
+            {/* 손절 후보 */}
+            <Card title="손절 후보" sub="골라서 쓰기 · 이 중 하나로 손절 고정">
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:9 }}>
+                {Object.entries(r.stops).map(([k,v])=>(
+                  <div key={k} style={{ background:"#F8F9FA", borderRadius:12, padding:"11px 13px" }}>
+                    <div style={{ fontSize:12, color:C.sub, fontWeight:600 }}>{k}</div>
+                    <div style={{ fontSize:16, fontWeight:800, marginTop:3 }}>
+                      {v==null?"—":Math.round(v).toLocaleString("ko-KR")+"원"}
+                    </div>
+                    <div style={{ fontSize:12, color:T.down, fontWeight:700, marginTop:1 }}>
+                      {v ? ((v/r.price-1)*100).toFixed(1)+"%" : ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            {/* 매매 플랜 바로가기 힌트 */}
+            <div style={{ background:"#EBF3FF", borderRadius:13, padding:"12px 14px",
+                          fontSize:13, color:"#1a5fa8", fontWeight:600, lineHeight:1.5 }}>
+              💡 손절 후보를 정했으면 → <b>매매 플랜 탭</b>에서 수량과 리스크를 계산해봐.
+            </div>
+          </>
+        )}
+      </div>
+
+      <div style={{ textAlign:"center", fontSize:11, color:C.sub, padding:"16px 20px 0", fontWeight:500, lineHeight:1.5 }}>
+        데모 데이터로 동작 중 · 실제 앱: fetchOhlcv()에 KIS 연결 시 동일 화면<br />
+        재무(실적)는 KIS 재무 API로 별도 연결
+      </div>
+    </div>
+  );
+}
+
+// ── AI 분석 탭 (서브탭 구조) ──
+function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, user }) {
+  const [subTab, setSubTab] = React.useState("sell");
+  const [loading, setLoading] = React.useState(false);
+  const [result, setResult] = React.useState(null);
+  const [error, setError] = React.useState(null);
+
+  const SUB_TABS = [
+    { id:"sell",  label:"💸 매도 판단" },
+    { id:"sector",label:"🔮 순환매" },
+    { id:"plan",  label:"📋 매매 플랜" },
+    { id:"check", label:"🔍 종목 체크" },
+  ];
+
+  // buildPrompt - 기존 로직 유지
+  const buildPrompt = (mode) => {
+    const krSummary = krRecords.map(r => {
+      const ratio = r.tradingAmt&&r.tradingAmt20 ? (r.tradingAmt/r.tradingAmt20).toFixed(1) : null;
+      return `[${r.date}] ${r.stock}(${getThemes(r).join(",")}) | 상승률:${r.change}% | 거래대금배수:${ratio||"?"}x | 기관:${r.instFlow?r.instFlowType+r.instFlow+"만주":"없음"} | 외인:${r.foreignFlow?r.foreignFlowType+r.foreignFlow+"만주":"없음"} | D+1:${r.d1Change??"-"}% | D+2:${r.d2Change??"-"}% | 이유:${r.reason||""}`;
+    }).join("\n");
+    const holdingSummary = holdings.map(h=>`${h.stock} 매수가:${h.buy_price?.toLocaleString()}원 (${h.buy_date})`).join("\n");
+    const base = `서현의 투자 스타일: 단기매매(1~3일), 대형주 위주.\n\n=== 국내주식 기록 (${krRecords.length}건) ===\n${krSummary||"없음"}\n\n=== 현재 보유 종목 ===\n${holdingSummary||"없음"}\n\n=== 매매 원칙 ===\n매수: ${principle.buy||"미작성"}\n매도: ${principle.sell||"미작성"}\n`;
+    if(mode==="sell") return base+"보유 중인 종목들에 대해 지금 팔아야 하나 버텨야 하나 판단해주세요. 각 종목별로 실시간 데이터 없이 매수가와 기간만으로 판단 가능한 부분을 알려주세요. 손절가(8일선 기준)와 목표가도 제시해주세요.";
+    if(mode==="sector") return base+"국내 섹터 순환매를 예측해주세요. 최근 기록된 테마들의 흐름을 보고 다음 강세 가능성이 높은 섹터를 분석해주세요.";
+    return base;
+  };
+
+  const runAnalysis = async(mode) => {
+    setLoading(true); setResult(null); setError(null);
+    try {
+      const res = await fetch("/.netlify/functions/analyze", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({prompt:buildPrompt(mode)}),
+      });
+      const data = await res.json();
+      if(!res.ok){setError("오류: "+(data.error||"알 수 없는 오류"));return;}
+      setResult({mode,text:data.text||"응답이 없어요."});
+    } catch(e) { setError("오류: "+(e.message||"네트워크 오류")); }
+    finally { setLoading(false); }
+  };
+
   const renderText = (text) => {
-    if (!text) return null;
-    return text.split("\n").map((line, i) => {
-      if (line.startsWith("### ")) return <div key={i} style={{fontWeight:800,fontSize:14,color:C.text,margin:"16px 0 6px",paddingBottom:4,borderBottom:`1.5px solid ${C.border}`}}>{line.slice(4)}</div>;
-      if (line.startsWith("## ")) return <div key={i} style={{fontWeight:800,fontSize:15,color:C.pink1,margin:"18px 0 8px"}}>{line.slice(3)}</div>;
-      if (line.startsWith("# ")) return <div key={i} style={{fontWeight:900,fontSize:16,color:C.text,margin:"20px 0 10px"}}>{line.slice(2)}</div>;
-      if (line.startsWith("**") && line.endsWith("**") && line.length > 4) return <div key={i} style={{fontWeight:800,fontSize:13,color:C.text,margin:"10px 0 4px"}}>{line.slice(2,-2)}</div>;
-      if (line.startsWith("- ") || line.startsWith("• ")) return <div key={i} style={{fontSize:13,color:C.text,padding:"3px 0 3px 16px",lineHeight:1.7,position:"relative"}}><span style={{position:"absolute",left:4,color:C.pink1}}>•</span>{line.slice(2)}</div>;
-      if (/^\d+\./.test(line)) {
-        const num = line.match(/^(\d+)\./)[1];
-        return <div key={i} style={{fontSize:13,color:C.text,padding:"4px 0 4px 20px",lineHeight:1.7,position:"relative"}}><span style={{position:"absolute",left:0,fontWeight:800,color:C.pink1,fontSize:12}}>{num}.</span>{line.replace(/^\d+\.\s*/,"")}</div>;
-      }
-      if (line.trim() === "") return <div key={i} style={{height:6}}/>;
-      // bold inline
-      const parts = line.split(/\*\*(.+?)\*\*/g);
-      if (parts.length > 1) {
-        return <div key={i} style={{fontSize:13,color:C.text,lineHeight:1.75,padding:"1px 0"}}>{parts.map((p,j)=>j%2===1?<strong key={j} style={{color:C.text}}>{p}</strong>:p)}</div>;
-      }
-      return <div key={i} style={{fontSize:13,color:C.text,lineHeight:1.75,padding:"1px 0"}}>{line}</div>;
+    if(!text)return null;
+    return text.split("\n").map((line,i)=>{
+      if(line.startsWith("## "))return<div key={i} style={{fontWeight:800,fontSize:15,color:C.pink1,margin:"16px 0 6px"}}>{line.slice(3)}</div>;
+      if(line.startsWith("### "))return<div key={i} style={{fontWeight:800,fontSize:14,color:C.text,margin:"12px 0 4px",borderBottom:`1px solid ${C.border}`,paddingBottom:4}}>{line.slice(4)}</div>;
+      if(line.startsWith("- ")||line.startsWith("• "))return<div key={i} style={{fontSize:13,color:C.text,padding:"3px 0 3px 16px",lineHeight:1.7,position:"relative"}}><span style={{position:"absolute",left:4,color:C.pink1}}>•</span>{line.slice(2)}</div>;
+      if(/^\d+\./.test(line)){const num=line.match(/^(\d+)\./)[1];return<div key={i} style={{fontSize:13,color:C.text,padding:"4px 0 4px 20px",lineHeight:1.7,position:"relative"}}><span style={{position:"absolute",left:0,fontWeight:800,color:C.pink1,fontSize:12}}>{num}.</span>{line.replace(/^\d+\.\s*/,"")}</div>;}
+      if(line.trim()==="")return<div key={i} style={{height:6}}/>;
+      const parts=line.split(/\*\*(.+?)\*\*/g);
+      if(parts.length>1)return<div key={i} style={{fontSize:13,color:C.text,lineHeight:1.75,padding:"1px 0"}}>{parts.map((p,j)=>j%2===1?<strong key={j}>{p}</strong>:p)}</div>;
+      return<div key={i} style={{fontSize:13,color:C.text,lineHeight:1.75,padding:"1px 0"}}>{line}</div>;
     });
   };
 
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {/* 상단 요약 카드 */}
-      <div style={{background:`linear-gradient(135deg,#7b2ff7,${C.pink1})`,borderRadius:18,padding:18,color:"white"}}>
-        <div style={{fontSize:22,marginBottom:6}}>🤖</div>
-        <div style={{fontWeight:900,fontSize:16,marginBottom:4}}>AI 종합 분석</div>
-        <div style={{fontSize:12,opacity:.85,lineHeight:1.6}}>
-          국내주식 {krRecords.length}건 · 미국주식 {usCards.length}건 · 공모주 {ipoRecords.length}건의 데이터를 기반으로 Claude가 분석합니다.
-        </div>
-        <div style={{display:"flex",gap:8,marginTop:12,flexWrap:"wrap"}}>
-          {[
-            {label:"기록된 종목", value:[...new Set(krRecords.map(r=>r.stock))].length+"개"},
-            {label:"D+1 입력률", value:(krRecords.filter(r=>r.d1Change!=null).length/Math.max(krRecords.length,1)*100).toFixed(0)+"%"},
-            {label:"공모주 승률", value:(ipoRecords.filter(r=>r.sellPrice&&Number(r.sellPrice)>=Number(r.ipoPrice)).length/Math.max(ipoRecords.filter(r=>r.sellPrice).length,1)*100).toFixed(0)+"%"},
-          ].map(s=>(
-            <div key={s.label} style={{background:"rgba(255,255,255,0.18)",borderRadius:10,padding:"6px 12px",backdropFilter:"blur(8px)"}}>
-              <div style={{fontSize:10,opacity:.8,marginBottom:1}}>{s.label}</div>
-              <div style={{fontWeight:800,fontSize:14}}>{s.value}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* 분석 모드 선택 */}
-      <div style={{fontWeight:800,fontSize:13,color:C.sub,marginBottom:-4}}>분석 항목을 선택하세요</div>
-      <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {MODES.map(m => (
-          <button key={m.id} onClick={()=>runAnalysis(m.id)} disabled={loading}
-            style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",borderRadius:16,border:`1.5px solid ${activeMode===m.id?m.color:C.border}`,background:activeMode===m.id?m.bg:C.card,cursor:loading?"not-allowed":"pointer",textAlign:"left",opacity:loading&&activeMode!==m.id?0.5:1,transition:"all 0.15s"}}>
-            <span style={{fontSize:22,flexShrink:0}}>{m.icon}</span>
-            <div style={{flex:1}}>
-              <div style={{fontWeight:800,fontSize:13,color:activeMode===m.id?m.color:C.text,marginBottom:2}}>{m.label}</div>
-              <div style={{fontSize:11,color:C.sub,lineHeight:1.4}}>{m.desc}</div>
-            </div>
-            {loading && activeMode===m.id
-              ? <div style={{width:20,height:20,border:`2px solid ${m.color}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite",flexShrink:0}}/>
-              : <span style={{fontSize:13,color:C.sub,flexShrink:0}}>→</span>
-            }
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {/* 서브탭 바 */}
+      <div style={{display:"flex",gap:0,background:C.card,borderRadius:14,border:`1px solid ${C.border}`,overflow:"hidden"}}>
+        {SUB_TABS.map(t=>(
+          <button key={t.id} onClick={()=>{setSubTab(t.id);setResult(null);setError(null);}}
+            style={{flex:1,padding:"10px 4px",border:"none",borderBottom:`2.5px solid ${subTab===t.id?"#7b2ff7":"transparent"}`,
+              background:subTab===t.id?"#f8f0ff":C.card,color:subTab===t.id?"#7b2ff7":C.sub,
+              fontWeight:subTab===t.id?800:600,fontSize:11,cursor:"pointer",transition:"all 0.15s"}}>
+            {t.label}
           </button>
         ))}
       </div>
 
-      {/* 로딩 */}
-      {loading && (
-        <div style={{background:C.card,borderRadius:16,padding:24,textAlign:"center",border:`1.5px solid ${C.border}`}}>
-          <div style={{fontSize:32,marginBottom:8}}>🔍</div>
-          <div style={{fontWeight:700,fontSize:14,color:C.text,marginBottom:4}}>AI가 데이터를 분석하고 있어요...</div>
-          <div style={{fontSize:12,color:C.sub}}>{modeInfo?.label} 진행 중</div>
+      {/* 💸 매도 판단 */}
+      {subTab==="sell"&&<>
+        <div style={{background:"linear-gradient(135deg,#2a9d8f,#1a7a6e)",borderRadius:18,padding:16,color:"white"}}>
+          <div style={{fontSize:20,marginBottom:4}}>💸</div>
+          <div style={{fontWeight:900,fontSize:15,marginBottom:2}}>보유 종목 매도 판단</div>
+          <div style={{fontSize:11,opacity:.85}}>지금 팔아야 하나 버텨야 하나</div>
+          {holdings.length>0&&<div style={{marginTop:10,display:"flex",flexWrap:"wrap",gap:6}}>
+            {holdings.map(h=>(
+              <div key={h.stock} style={{background:"rgba(255,255,255,0.2)",borderRadius:8,padding:"4px 10px"}}>
+                <div style={{fontSize:12,fontWeight:700}}>{h.stock}</div>
+                <div style={{fontSize:10,opacity:.8}}>{h.buy_price?.toLocaleString()}원 · D+{Math.floor((new Date()-new Date(h.buy_date))/86400000)}</div>
+              </div>
+            ))}
+          </div>}
+          {holdings.length===0&&<div style={{fontSize:11,opacity:.7,marginTop:6}}>관심종목 탭에서 매수 입력하면 여기서 분석돼요</div>}
         </div>
-      )}
+        <button onClick={()=>runAnalysis("sell")} disabled={loading||holdings.length===0}
+          style={{padding:"14px",borderRadius:14,border:"none",background:holdings.length===0?"#e0e0e0":"linear-gradient(135deg,#2a9d8f,#1a7a6e)",color:"white",fontWeight:700,fontSize:14,cursor:holdings.length===0?"not-allowed":"pointer"}}>
+          {loading?"분석 중...":"🔍 매도 판단 시작"}
+        </button>
+        {error&&<div style={{background:C.red2,borderRadius:12,padding:14,fontSize:13,color:"#c0392b",fontWeight:700}}>⚠️ {error}</div>}
+        {result&&result.mode==="sell"&&!loading&&<div style={{background:C.card,borderRadius:18,border:`1.5px solid #a8e6cf`,overflow:"hidden"}}>
+          <div style={{padding:"12px 16px",background:C.mint2,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontWeight:800,fontSize:13,color:"#2a9d8f"}}>💸 매도 판단 결과</span>
+            <button onClick={()=>setResult(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:14,color:C.sub}}>✕</button>
+          </div>
+          <div style={{padding:"14px 16px 18px",maxHeight:500,overflowY:"auto"}}>{renderText(result.text)}</div>
+        </div>}
+      </>}
 
-      {/* 에러 */}
-      {error && (
-        <div style={{background:C.red2,borderRadius:16,padding:16,border:`1.5px solid ${C.red1}`}}>
-          <div style={{fontSize:13,color:"#c0392b",fontWeight:700}}>⚠️ {error}</div>
+      {/* 🔮 순환매 */}
+      {subTab==="sector"&&<>
+        <div style={{background:"linear-gradient(135deg,#7b2ff7,#9b59b6)",borderRadius:18,padding:16,color:"white"}}>
+          <div style={{fontSize:20,marginBottom:4}}>🔮</div>
+          <div style={{fontWeight:900,fontSize:15,marginBottom:2}}>섹터 순환매 예측</div>
+          <div style={{fontSize:11,opacity:.85}}>기록된 테마 흐름 기반 다음 강세 섹터 분석</div>
         </div>
-      )}
+        <button onClick={()=>runAnalysis("sector")} disabled={loading}
+          style={{padding:"14px",borderRadius:14,border:"none",background:"linear-gradient(135deg,#7b2ff7,#9b59b6)",color:"white",fontWeight:700,fontSize:14,cursor:loading?"not-allowed":"pointer"}}>
+          {loading?"분석 중...":"🔍 순환매 분석 시작"}
+        </button>
+        {error&&<div style={{background:C.red2,borderRadius:12,padding:14,fontSize:13,color:"#c0392b",fontWeight:700}}>⚠️ {error}</div>}
+        {result&&result.mode==="sector"&&!loading&&<div style={{background:C.card,borderRadius:18,border:`1.5px solid #c8b8f8`,overflow:"hidden"}}>
+          <div style={{padding:"12px 16px",background:"#f0e8ff",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontWeight:800,fontSize:13,color:"#7b2ff7"}}>🔮 순환매 예측 결과</span>
+            <button onClick={()=>setResult(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:14,color:C.sub}}>✕</button>
+          </div>
+          <div style={{padding:"14px 16px 18px",maxHeight:500,overflowY:"auto"}}>{renderText(result.text)}</div>
+        </div>}
+      </>}
 
-      {/* 결과 */}
-      {result && !loading && (
-        <div style={{background:C.card,borderRadius:18,border:`1.5px solid ${MODES.find(m=>m.id===result.mode)?.color||C.border}`,overflow:"hidden"}}>
-          <div style={{padding:"14px 16px",background:MODES.find(m=>m.id===result.mode)?.bg||C.pink3,borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:18}}>{MODES.find(m=>m.id===result.mode)?.icon}</span>
-              <span style={{fontWeight:800,fontSize:14,color:MODES.find(m=>m.id===result.mode)?.color||C.text}}>
-                {MODES.find(m=>m.id===result.mode)?.label} 결과
-              </span>
-            </div>
-            <button onClick={()=>setResult(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:16,color:C.sub}}>✕</button>
-          </div>
-          <div style={{padding:"16px 16px 20px",maxHeight:600,overflowY:"auto"}}>
-            {renderText(result.text)}
-          </div>
-          <div style={{padding:"12px 16px",borderTop:`1px solid ${C.border}`,display:"flex",gap:8}}>
-            <button onClick={()=>runAnalysis(result.mode)} style={{flex:1,padding:"9px",borderRadius:10,border:`1.5px solid ${C.border}`,background:C.cream1,fontWeight:700,fontSize:12,cursor:"pointer",color:C.sub}}>🔄 재분석</button>
-            <PBtn onClick={()=>{navigator.clipboard?.writeText(result.text);}} style={{flex:2,padding:"9px"}}>📋 결과 복사</PBtn>
-          </div>
-        </div>
-      )}
+      {/* 📋 매매 플랜 */}
+      {subTab==="plan"&&<TradePlanTab/>}
+
+      {/* 🔍 종목 체크 */}
+      {subTab==="check"&&<StockCheckTab/>}
 
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }
+
 
 // ── 공모주 탭 ──
 function IPOTab({records,setRecords,schedules,setSchedules,onAddRec,onAddSched}) {
@@ -1230,6 +1836,8 @@ function IPOTab({records,setRecords,schedules,setSchedules,onAddRec,onAddSched})
 
 // ── 메인 앱 ──
 function App({user}) {
+  // tradePlan 저장을 위해 현재 유저 전역 노출
+  React.useEffect(()=>{ window.__currentUser = user; return()=>{ window.__currentUser = null; }; }, [user]);
   const fb = window.__firebase;
   const [, forceUpdate] = React.useReducer(x=>x+1, 0);
   React.useEffect(()=>{
@@ -1673,7 +2281,7 @@ function App({user}) {
           </div>
         </>}
 
-        {tab==="ai"&&<AIAnalysisTab krRecords={krRecords} usCards={usCards} ipoRecords={ipoRecords} principle={principle}/>}
+        {tab==="ai"&&<AIAnalysisTab krRecords={krRecords} usCards={usCards} ipoRecords={ipoRecords} principle={principle} holdings={holdings} user={user}/>}
 
         {tab==="memo"&&<>
           {/* 테마명 일괄 변경 */}
