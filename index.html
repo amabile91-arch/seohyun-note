@@ -877,7 +877,7 @@ function Metric({ k, v, hint, color }) {
 // ─────────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = { account:50000000, riskPct:1.5, maxWeightPct:20 };
 
-export function TradePlanTab() {
+function TradePlanTab() {
   const [view,     setView]     = useState("plan");   // plan | journal | stats
   const [market,   setMarket]   = useState("KR");
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -1209,7 +1209,7 @@ export function TradePlanTab() {
 // ─────────────────────────────────────────────────────────────
 // 9. 종목 체크 탭
 // ─────────────────────────────────────────────────────────────
-export function StockCheckTab() {
+function StockCheckTab() {
   const [q,       setQ]       = useState("");
   const [loading, setLoading] = useState(false);
   const [result,  setResult]  = useState(null);
