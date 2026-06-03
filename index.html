@@ -1549,8 +1549,18 @@ function scFmtMoney(won){
   return Math.round(won).toLocaleString()+"원";
 }
 function scSetupColor(s){ if(!s)return""; if(s.includes("우상향"))return"pos"; if(s.includes("급등주"))return"warn"; if(s.includes("추세이탈")||s.includes("역배열"))return"neg"; return""; }
-function buildLiveDash(d){
+function scFmtNtby(v){ if(v==null) return "-"; const m=Math.round(v/10000); if(m>0) return "+"+m.toLocaleString()+"만주"; if(m<0) return m.toLocaleString()+"만주"; return "0"; }
+function buildLiveDash(d, risk){
   const sign=v=>(v>0?"+":"")+v;
+  let supplyRows;
+  if(d.frgn_ntby!=null||d.inst_ntby!=null){
+    const bu=d.frgn_ntby>0&&d.inst_ntby>0, bd=d.frgn_ntby<0&&d.inst_ntby<0;
+    supplyRows=[
+      ["외국인", scFmtNtby(d.frgn_ntby), d.frgn_ntby>0?"pos":d.frgn_ntby<0?"neg":""],
+      ["기관", scFmtNtby(d.inst_ntby), d.inst_ntby>0?"pos":d.inst_ntby<0?"neg":""],
+      bu?["동반 매수","외인·기관 동시","pos","dot"]:bd?["동반 매도","외인·기관 동시 매도","neg","dot"]:["수급 방향","엇갈림",""],
+    ];
+  } else { supplyRows=[["데이터","준비 중",""]]; }
   return {
     "판정":[["셋업 유형", d.setup||"-", scSetupColor(d.setup)]],
     "추세 · 강도":[
@@ -1567,11 +1577,15 @@ function buildLiveDash(d){
       ["박스 압축", d.box_ratio!=null?String(d.box_ratio):"-", ""],
       ["응축셋업", d.box_compressed?"활성 (압축 구간)":"비활성", d.box_compressed?"pos":""],
     ],
+    "수급 (당일 순매수)": supplyRows,
+    "리스크 관리 (ATR×1.5 · 기계적 참고선)": risk ? [
+      ["현재가(가정 진입)", risk.entry.toLocaleString(), ""],
+      ["손절(SL)", `${risk.sl.toLocaleString()} (${risk.slPct.toFixed(1)}%)`, "neg"],
+      ["목표 TP1 / TP2", `${risk.tp1.toLocaleString()} / ${risk.tp2.toLocaleString()}`, "pos"],
+    ] : [["계산 불가","ATR 데이터 없음",""]],
     "아직 미연결 (데이터 출처 필요)":[
-      ["수급(외인·기관)","준비 중",""],
       ["공시·목표가","준비 중",""],
       ["시장·섹터","준비 중",""],
-      ["진입·손절·목표","준비 중",""],
       ["보유 현황","관심종목 연동 예정",""],
     ],
   };
@@ -1604,8 +1618,24 @@ function SignalChartTab(){
         const ch=lastC.close-(prevC?prevC.close:lastC.open);
         const pct=prevC&&prevC.close?ch/prevC.close*100:0;
         setPx({price:lastC.close,change:ch,pct});
-        setMarkers([]); setLevels([]);              // 실거래 진입/SL/TP 데이터 없음 → 가짜 선 제거
-        if(data.dashboard) setDash(buildLiveDash(data.dashboard));
+        // ATR×1.5 기반 기계적 손절/목표선 (참고용, 투자조언 아님)
+        const atr=data.dashboard?data.dashboard.atr:null;
+        const entry=lastC.close;
+        let risk=null, lv=[];
+        if(atr){
+          const sl=Math.round(entry-1.5*atr);
+          const R=entry-sl;
+          const tp1=Math.round(entry+1.5*R), tp2=Math.round(entry+3*R);
+          risk={entry:Math.round(entry),sl,tp1,tp2,slPct:(sl-entry)/entry*100};
+          lv=[
+            {p:entry,label:`현재가 ${Math.round(entry).toLocaleString()}`,color:"#8a8f99",dash:[2,3]},
+            {p:sl,label:`손절 ${sl.toLocaleString()}`,color:"#e0564e",dash:[6,4]},
+            {p:tp1,label:`목표1 ${tp1.toLocaleString()}`,color:"#3f86d4",dash:[6,4]},
+            {p:tp2,label:`목표2 ${tp2.toLocaleString()}`,color:"#3f86d4",dash:[6,4]},
+          ];
+        }
+        setMarkers([]); setLevels(lv);
+        if(data.dashboard) setDash(buildLiveDash(data.dashboard, risk));
         setLive(true);
         ws=new WebSocket(`${SC_SERVER_URL.replace(/^http/,"ws")}/ws/${code}`);
         ws.onmessage=e=>{
