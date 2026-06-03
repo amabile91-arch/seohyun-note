@@ -1472,7 +1472,7 @@ const SC_LEVELS=[
 ];
 
 /* ---------- 캔들 차트 (외부 라이브러리 없이 캔버스로) ---------- */
-function SCCandleChart({candles, markers, levels}){
+function SCCandleChart({candles, markers, levels, boxes=[]}){
   const ref=useRef(null);
   useEffect(()=>{
     const cv=ref.current; if(!cv||!candles.length) return;
@@ -1498,6 +1498,7 @@ function SCCandleChart({candles, markers, levels}){
       ctx.clearRect(0,0,W,H);
       ctx.strokeStyle="#e7e9ee";ctx.fillStyle="#79808d";ctx.font="10px "+SC_FONT;ctx.textAlign="left";ctx.textBaseline="middle";
       for(let g=0;g<=4;g++){const p=minP+(maxP-minP)*g/4,y=Y(p);ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.fillText(fmt(p),W-padR+6,y);}
+      boxes.forEach(b=>{const x1=X(b.from)-xStep/2,x2=X(b.to)+xStep/2,yT=Y(b.top),yB=Y(b.bottom);ctx.fillStyle="rgba(123,47,247,0.08)";ctx.fillRect(x1,yT,x2-x1,yB-yT);ctx.setLineDash([4,3]);ctx.strokeStyle="rgba(123,47,247,0.45)";ctx.lineWidth=1;ctx.strokeRect(x1,yT,x2-x1,yB-yT);ctx.setLineDash([]);ctx.font="700 10px "+SC_FONT;ctx.fillStyle="#7b2ff7";ctx.textAlign="left";ctx.fillText("응축 박스",x1+4,yT+8);});
       levels.forEach(l=>{const y=Y(l.p);ctx.setLineDash(l.dash);ctx.strokeStyle=l.color;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.setLineDash([]);ctx.font="700 10px "+SC_FONT;const w=ctx.measureText(l.label).width+10;rr(W-padR+2,y-8,w,16,4);ctx.fillStyle=l.color;ctx.fill();ctx.fillStyle="#fff";ctx.textAlign="left";ctx.fillText(l.label,W-padR+7,y+.5);});
       lineS(e55,"#d8b53f",2);lineS(e21,"#e69533",1.6);lineS(e8,"#c2c6cd",1.6);
       const bw=Math.max(2,xStep*0.62);
@@ -1513,7 +1514,7 @@ function SCCandleChart({candles, markers, levels}){
     cv.addEventListener("pointermove",onMove);
     cv.addEventListener("pointerleave",onLeave);
     return ()=>{window.removeEventListener("resize",resize);cv.removeEventListener("pointermove",onMove);cv.removeEventListener("pointerleave",onLeave);};
-  },[candles,markers,levels]);
+  },[candles,markers,levels,boxes]);
   return <canvas ref={ref} style={{width:"100%",height:"460px",display:"block"}} />;
 }
 
@@ -1550,7 +1551,7 @@ function scFmtMoney(won){
 }
 function scSetupColor(s){ if(!s)return""; if(s.includes("우상향"))return"pos"; if(s.includes("급등주"))return"warn"; if(s.includes("추세이탈")||s.includes("역배열"))return"neg"; return""; }
 function scFmtNtby(v){ if(v==null) return "-"; const m=Math.round(v/10000); if(m>0) return "+"+m.toLocaleString()+"만주"; if(m<0) return m.toLocaleString()+"만주"; return "0"; }
-function buildLiveDash(d, risk){
+function buildLiveDash(d, risk, holding){
   const sign=v=>(v>0?"+":"")+v;
   let supplyRows;
   if(d.frgn_ntby!=null||d.inst_ntby!=null){
@@ -1578,26 +1579,32 @@ function buildLiveDash(d, risk){
       ["응축셋업", d.box_compressed?"활성 (압축 구간)":"비활성", d.box_compressed?"pos":""],
     ],
     "수급 (당일 순매수)": supplyRows,
-    "리스크 관리 (ATR×1.5 · 기계적 참고선)": risk ? [
+    "리스크 관리 (참고선 · 조언 아님)": risk ? [
+      ["기준", risk.base||"-", ""],
       ["현재가(가정 진입)", risk.entry.toLocaleString(), ""],
       ["손절(SL)", `${risk.sl.toLocaleString()} (${risk.slPct.toFixed(1)}%)`, "neg"],
       ["목표 TP1 / TP2", `${risk.tp1.toLocaleString()} / ${risk.tp2.toLocaleString()}`, "pos"],
-    ] : [["계산 불가","ATR 데이터 없음",""]],
+    ] : [["계산 불가","데이터 부족",""]],
+    "보유 현황": holding ? [
+      ["종목 / 평단", `${holding.name} · ${Math.round(holding.buyPrice).toLocaleString()}`, ""],
+      ["평가손익", (holding.pnlPct>=0?"+":"")+holding.pnlPct.toFixed(1)+"%", holding.pnlPct>=0?"pos":"neg"],
+      ["보유 기간", `D+${holding.days}`+(holding.days>3?" ⚠ 원칙(1~3일) 초과":""), holding.days>3?"warn":""],
+    ] : [["보유","미보유 (관심종목에서 매수 입력 시 표시)",""]],
     "아직 미연결 (데이터 출처 필요)":[
       ["공시·목표가","준비 중",""],
       ["시장·섹터","준비 중",""],
-      ["보유 현황","관심종목 연동 예정",""],
     ],
   };
 }
 
-function SignalChartTab(){
+function SignalChartTab({ holdings=[], favorites=[] }){
   const [query,setQuery]=useState("");
   const [name,setName]=useState("로보월드");
   const [code,setCode]=useState("DEMO");
   const [candles,setCandles]=useState(scMakeDemo());
   const [markers,setMarkers]=useState(SC_MARKERS);
   const [levels,setLevels]=useState(SC_LEVELS);
+  const [boxes,setBoxes]=useState([]);
   const [dash,setDash]=useState(SC_DASH);
   const [px,setPx]=useState({price:394500,change:69000,pct:21.20});
   const [live,setLive]=useState(false);
@@ -1618,24 +1625,43 @@ function SignalChartTab(){
         const ch=lastC.close-(prevC?prevC.close:lastC.open);
         const pct=prevC&&prevC.close?ch/prevC.close*100:0;
         setPx({price:lastC.close,change:ch,pct});
-        // ATR×1.5 기반 기계적 손절/목표선 (참고용, 투자조언 아님)
-        const atr=data.dashboard?data.dashboard.atr:null;
+        const dash0=data.dashboard||{};
+        const atr=dash0.atr!=null?dash0.atr:null;
         const entry=lastC.close;
+
+        // 응축 박스: 서버가 압축 판정하면 최근 20봉 고저 범위를 박스로 표시
+        const WIN=20; let box=null;
+        if(dash0.box_compressed && cs.length>=WIN){
+          const seg=cs.slice(-WIN);
+          box={from:cs.length-WIN,to:cs.length-1,top:Math.max.apply(null,seg.map(c=>c.high)),bottom:Math.min.apply(null,seg.map(c=>c.low))};
+        }
+        setBoxes(box?[box]:[]);
+
+        // 손절/목표: 응축이면 박스 저점, 아니면 ATR×1.5 (둘 다 기계적 참고선)
         let risk=null, lv=[];
-        if(atr){
-          const sl=Math.round(entry-1.5*atr);
-          const R=entry-sl;
-          const tp1=Math.round(entry+1.5*R), tp2=Math.round(entry+3*R);
-          risk={entry:Math.round(entry),sl,tp1,tp2,slPct:(sl-entry)/entry*100};
+        const mkLevels=(sl)=>{ const R=entry-sl; if(!(R>0)) return null; return {sl:Math.round(sl),tp1:Math.round(entry+1.5*R),tp2:Math.round(entry+3*R)}; };
+        let calc=null, base="";
+        if(box){ calc=mkLevels(box.bottom); base="응축 박스 저점"; }
+        if(!calc && atr){ calc=mkLevels(entry-1.5*atr); base="ATR×1.5"; }
+        if(calc){
+          risk={entry:Math.round(entry),sl:calc.sl,tp1:calc.tp1,tp2:calc.tp2,slPct:(calc.sl-entry)/entry*100,base};
           lv=[
             {p:entry,label:`현재가 ${Math.round(entry).toLocaleString()}`,color:"#8a8f99",dash:[2,3]},
-            {p:sl,label:`손절 ${sl.toLocaleString()}`,color:"#e0564e",dash:[6,4]},
-            {p:tp1,label:`목표1 ${tp1.toLocaleString()}`,color:"#3f86d4",dash:[6,4]},
-            {p:tp2,label:`목표2 ${tp2.toLocaleString()}`,color:"#3f86d4",dash:[6,4]},
+            {p:calc.sl,label:`손절 ${calc.sl.toLocaleString()}`,color:"#e0564e",dash:[6,4]},
+            {p:calc.tp1,label:`목표1 ${calc.tp1.toLocaleString()}`,color:"#3f86d4",dash:[6,4]},
+            {p:calc.tp2,label:`목표2 ${calc.tp2.toLocaleString()}`,color:"#3f86d4",dash:[6,4]},
           ];
         }
+
+        // 보유 현황: 검색한 코드가 관심종목(코드↔이름)에 있고 보유 중이면 표시
+        let hold=null;
+        const fav=(favorites||[]).find(f=>f&&f.code===code);
+        const nm=fav?fav.name:null;
+        const h=nm?(holdings||[]).find(x=>x.stock===nm):null;
+        if(h&&h.buy_price){ hold={name:nm,buyPrice:h.buy_price,pnlPct:(entry-h.buy_price)/h.buy_price*100,days:daysDiff(h.buy_date)}; lv.push({p:h.buy_price,label:`평단 ${Math.round(h.buy_price).toLocaleString()}`,color:"#9b59b6",dash:[2,2]}); }
+
         setMarkers([]); setLevels(lv);
-        if(data.dashboard) setDash(buildLiveDash(data.dashboard, risk));
+        if(data.dashboard) setDash(buildLiveDash(dash0, risk, hold));
         setLive(true);
         ws=new WebSocket(`${SC_SERVER_URL.replace(/^http/,"ws")}/ws/${code}`);
         ws.onmessage=e=>{
@@ -1676,7 +1702,7 @@ function SignalChartTab(){
 
         <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 348px",gap:14}} className="sc-grid">
           <div style={{background:"#fff",border:"1px solid #e7e9ee",borderRadius:12,padding:6}}>
-            <SCCandleChart candles={candles} markers={markers} levels={levels}/>
+            <SCCandleChart candles={candles} markers={markers} levels={levels} boxes={boxes}/>
           </div>
           <SCDash dash={dash}/>
         </div>
@@ -1688,7 +1714,7 @@ function SignalChartTab(){
 }
 
 // ── AI 분석 탭 (서브탭 구조) ──
-function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, user }) {
+function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, favorites, user }) {
   const [subTab, setSubTab] = React.useState("sector");
   const [loading, setLoading] = React.useState(false);
   const [result, setResult] = React.useState(null);
@@ -1791,7 +1817,7 @@ function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, us
       {subTab==="plan"&&<TradePlanTab user={user}/>}
 
       {/* 📊 시그널 차트 */}
-      {subTab==="signal"&&<SignalChartTab/>}
+      {subTab==="signal"&&<SignalChartTab holdings={holdings} favorites={favorites}/>}
 
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
@@ -2561,7 +2587,7 @@ function App({user}) {
           </div>
         </>}
 
-        {tab==="ai"&&<AIAnalysisTab krRecords={krRecords} usCards={usCards} ipoRecords={ipoRecords} principle={principle} holdings={holdings} user={user}/>}
+        {tab==="ai"&&<AIAnalysisTab krRecords={krRecords} usCards={usCards} ipoRecords={ipoRecords} principle={principle} holdings={holdings} favorites={favorites} user={user}/>}
 
         {tab==="memo"&&<>
           {/* 테마명 일괄 변경 */}
