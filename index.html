@@ -1540,52 +1540,105 @@ function SCDash({dash}){
 }
 
 /* ---------- 시그널 차트 메인 (탭에 임베드) ---------- */
+/* 서버 dashboard → 화면 대시보드 변환 */
+function scFmtMoney(won){
+  if(won==null) return "-";
+  const e=won/1e8; // 억
+  if(e>=10000) return (e/10000).toFixed(1)+"조";
+  if(e>=1) return Math.round(e).toLocaleString()+"억";
+  return Math.round(won).toLocaleString()+"원";
+}
+function scSetupColor(s){ if(!s)return""; if(s.includes("우상향"))return"pos"; if(s.includes("급등주"))return"warn"; if(s.includes("추세이탈")||s.includes("역배열"))return"neg"; return""; }
+function buildLiveDash(d){
+  const sign=v=>(v>0?"+":"")+v;
+  return {
+    "판정":[["셋업 유형", d.setup||"-", scSetupColor(d.setup)]],
+    "추세 · 강도":[
+      ["EMA 정렬", d.ema_alignment||"-", d.ema_alignment==="정배열"?"pos":d.ema_alignment==="역배열"?"neg":""],
+      ["추세 에너지", d.trend_energy!=null?String(d.trend_energy):"-", d.trend_energy>0?"pos":d.trend_energy<0?"neg":""],
+      ["이격도(EMA8)", d.disparity8!=null?sign(d.disparity8)+"%":"-", (d.disparity8!=null&&Math.abs(d.disparity8)>=8)?"warn":""],
+      ["RSI(14)", d.rsi!=null?String(d.rsi):"-", d.rsi>=70?"warn":d.rsi!=null&&d.rsi<=30?"pos":""],
+      ["거래량 강도", d.vol_ratio!=null?d.vol_ratio+"배":"-", d.vol_ratio>=2?"pos":""],
+      ["거래대금", scFmtMoney(d.turnover), ""],
+      ["52주 고점%", d.from_52w_high!=null?sign(d.from_52w_high)+"%":"-", ""],
+    ],
+    "변동성 · 셋업":[
+      ["ATR(14)", d.atr!=null?(d.atr.toLocaleString()+(d.atr_pct!=null?` (${d.atr_pct}%)`:"")):"-", ""],
+      ["박스 압축", d.box_ratio!=null?String(d.box_ratio):"-", ""],
+      ["응축셋업", d.box_compressed?"활성 (압축 구간)":"비활성", d.box_compressed?"pos":""],
+    ],
+    "아직 미연결 (데이터 출처 필요)":[
+      ["수급(외인·기관)","준비 중",""],
+      ["공시·목표가","준비 중",""],
+      ["시장·섹터","준비 중",""],
+      ["진입·손절·목표","준비 중",""],
+      ["보유 현황","관심종목 연동 예정",""],
+    ],
+  };
+}
+
 function SignalChartTab(){
   const [query,setQuery]=useState("");
   const [name,setName]=useState("로보월드");
   const [code,setCode]=useState("DEMO");
   const [candles,setCandles]=useState(scMakeDemo());
-  const [markers]=useState(SC_MARKERS);
-  const [levels]=useState(SC_LEVELS);
-  const [dash]=useState(SC_DASH);
+  const [markers,setMarkers]=useState(SC_MARKERS);
+  const [levels,setLevels]=useState(SC_LEVELS);
+  const [dash,setDash]=useState(SC_DASH);
+  const [px,setPx]=useState({price:394500,change:69000,pct:21.20});
   const [live,setLive]=useState(false);
+  const [err,setErr]=useState("");
 
   // 실시간 모드: 서버 주소가 채워져 있을 때만 동작
   useEffect(()=>{
     if(!SC_SERVER_URL||code==="DEMO") return;
-    let ws;
+    let ws; setErr("");
     (async()=>{
       try{
         const res=await fetch(`${SC_SERVER_URL}/api/chart/${code}`);
         const data=await res.json();
-        setCandles(data.candles.map(c=>({open:c.open,high:c.high,low:c.low,close:c.close})));
+        if(!data.candles||!data.candles.length){ setErr("데이터를 못 받았어요. 종목코드(6자리)가 맞는지 확인해줘요."); return; }
+        const cs=data.candles;
+        setCandles(cs.map(c=>({open:c.open,high:c.high,low:c.low,close:c.close})));
+        const lastC=cs[cs.length-1], prevC=cs[cs.length-2];
+        const ch=lastC.close-(prevC?prevC.close:lastC.open);
+        const pct=prevC&&prevC.close?ch/prevC.close*100:0;
+        setPx({price:lastC.close,change:ch,pct});
+        setMarkers([]); setLevels([]);              // 실거래 진입/SL/TP 데이터 없음 → 가짜 선 제거
+        if(data.dashboard) setDash(buildLiveDash(data.dashboard));
         setLive(true);
         ws=new WebSocket(`${SC_SERVER_URL.replace(/^http/,"ws")}/ws/${code}`);
         ws.onmessage=e=>{
           const t=JSON.parse(e.data);
-          if(t.price) setCandles(prev=>{const n=[...prev];n[n.length-1]={...n[n.length-1],close:t.price,high:Math.max(n[n.length-1].high,t.price),low:Math.min(n[n.length-1].low,t.price)};return n;});
+          if(t.price){
+            setPx(p=>({price:t.price,change:(t.change!=null?t.change:p.change),pct:(t.change_pct!=null?t.change_pct:p.pct)}));
+            setCandles(prev=>{const n=[...prev];const i=n.length-1;n[i]={...n[i],close:t.price,high:Math.max(n[i].high,t.price),low:Math.min(n[i].low,t.price)};return n;});
+          }
         };
-      }catch(err){/* 서버 미준비 시 예시 데이터 유지 */}
+      }catch(e2){ setErr("서버 연결에 실패했어요. 잠시 후 다시 시도해줘요."); }
     })();
     return ()=>ws&&ws.close();
   },[code]);
 
   const search=()=>{ if(!query.trim())return; setName(query.trim()); setCode(SC_SERVER_URL?query.trim():"DEMO"); };
+  const up=px.change>=0, col=up?"#1f9d73":"#e0564e";
 
   return (
     <div style={{fontFamily:SC_FONT,background:"transparent",padding:0}}>
       <div style={{maxWidth:1300,margin:"0 auto"}}>
         <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
           <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&search()}
-            placeholder="종목명 또는 코드 검색"
+            placeholder="종목코드 6자리 (예: 005930)"
             style={{flex:"1 1 200px",padding:"9px 12px",borderRadius:8,border:"1px solid #e7e9ee",fontSize:14,fontFamily:SC_FONT}}/>
           <button onClick={search} style={{padding:"9px 18px",borderRadius:8,border:"none",background:"#1d2330",color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>조회</button>
         </div>
 
+        {err&&<div style={{background:"#fde8e8",border:"1px solid #f4a0a0",borderRadius:8,padding:"8px 12px",fontSize:12.5,color:"#c0392b",marginBottom:10,fontWeight:600}}>{err}</div>}
+
         <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",padding:"2px 2px 12px"}}>
           <span style={{fontWeight:800,fontSize:18}}>{name} <span style={{color:"#79808d",fontWeight:600,fontSize:12.5}}>· KRX · 1D</span></span>
-          <span style={{fontWeight:800,fontSize:19,color:"#1f9d73",fontVariantNumeric:"tabular-nums"}}>394,500</span>
-          <span style={{fontWeight:700,fontSize:13,color:"#1f9d73"}}>+69,000 (+21.20%)</span>
+          <span style={{fontWeight:800,fontSize:19,color:col,fontVariantNumeric:"tabular-nums"}}>{Math.round(px.price).toLocaleString()}</span>
+          <span style={{fontWeight:700,fontSize:13,color:col}}>{(up?"+":"")+Math.round(px.change).toLocaleString()} ({(up?"+":"")+px.pct.toFixed(2)}%)</span>
           <span style={{marginLeft:"auto",fontSize:11,color:"#79808d",border:"1px solid #e7e9ee",padding:"3px 9px",borderRadius:6,background:"#fff"}}>
             {live?"● 실시간":"예시 데이터 · 실거래 아님"}
           </span>
