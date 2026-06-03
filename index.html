@@ -884,7 +884,37 @@ function Metric({ k, v, hint, color }) {
 // ─────────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = { account:50000000, riskPct:1.5, maxWeightPct:20 };
 
-function TradePlanTab() {
+// ── 매매플랜 저장소: Firebase  users/{uid}/tradePlan/{key} ──
+//   (window.__currentUser 는 App 에서 노출됨 — line "tradePlan 저장을 위해 현재 유저 전역 노출")
+const KEY_SETTINGS = "settings";
+const KEY_JOURNAL  = "journal";
+
+async function storageGet(key, fallback) {
+  try {
+    const user = window.__currentUser;
+    const fb   = window.__firebase;
+    if (!user || !fb) return fallback;
+    const snap = await fb.getDoc(fb.doc(fb.db, `users/${user.uid}/tradePlan/${key}`));
+    if (snap.exists()) {
+      const d = snap.data();
+      return (d && "value" in d) ? d.value : fallback;
+    }
+  } catch (e) { console.error("storageGet error:", e); }
+  return fallback;
+}
+
+async function storageSet(key, value) {
+  try {
+    const user = window.__currentUser;
+    const fb   = window.__firebase;
+    if (!user || !fb) return;
+    await fb.setDoc(fb.doc(fb.db, `users/${user.uid}/tradePlan/${key}`), { value });
+  } catch (e) { console.error("storageSet error:", e); }
+}
+
+function TradePlanTab({ user }) {
+  // user 가 전달되면 전역에도 노출 (storageGet/Set 가 window.__currentUser 사용)
+  React.useEffect(()=>{ if(user) window.__currentUser = user; }, [user]);
   const [view,     setView]     = useState("plan");   // plan | journal | stats
   const [market,   setMarket]   = useState("KR");
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -1394,19 +1424,201 @@ function StockCheckTab() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// 📊 시그널 차트 (SignalChart.jsx 통합 — export default 제거)
+//   SC_SERVER_URL = "" 이면 예시 모드 / 주소를 넣으면 실시간 모드
+// ─────────────────────────────────────────────────────────────
+const SC_SERVER_URL = ""; // ← 비어있으면 예시 모드 / 주소를 넣으면 실시간 모드
+const SC_FONT = "'Pretendard','Apple SD Gothic Neo','Malgun Gothic',system-ui,sans-serif";
+
+/* ---------- 예시 데이터 + 지표 ---------- */
+function scLcg(s){return ()=>{s=(s*1664525+1013904223)%4294967296;return s/4294967296;};}
+function scMakeDemo(){
+  const r=scLcg(73); const out=[]; let p=250000;
+  for(let i=0;i<70;i++){
+    let d = i<24?(r()-0.5)*6000 : i<44?4200+(r()-0.4)*8000 : i<53?6500+(r()-0.35)*9000 : -6000+(r()-0.5)*9000;
+    const o=p, c=Math.max(180000,o+d);
+    out.push({open:o,high:Math.max(o,c)+r()*5000,low:Math.min(o,c)-r()*5000,close:c});
+    p=c;
+  }
+  return out;
+}
+function scEma(v,p){const k=2/(p+1);const o=[v[0]];for(let i=1;i<v.length;i++)o.push(v[i]*k+o[i-1]*(1-k));return o;}
+
+const SC_DASH = {
+  판정:[["시그널","매수 진입","pos","dot"],["확신 등급","A (강한)",""],["셋업 유형","우상향 (클린 추세)","pos"],["SMART 평가","안정적 우상향","pos"]],
+  "추세 · 강도":[["EMA 정렬","정배열 (유지)","pos"],["추세 에너지","상승 가속 (23.9)","pos"],["이격도(EMA8)","+6.8% (과열권)","warn"],["상대강도 RS","99점","pos"],["거래량 강도","2.1배 ↑",""],["거래대금","3,820억 (평소 2.1배)",""],["52주 고점%","-2.1%",""]],
+  "변동성 · 셋업":[["ATR(14)","17,200 (4.4%)",""],["박스 압축","낮음 (추세 진행형)",""],["응축셋업","비활성 (추세 구간)",""]],
+  수급:[["외국인(5일)","+38.2만주","pos"],["기관(5일)","+12.4만주","pos"],["동반 매수","외인·기관 동시","pos","dot"]],
+  "재료(공시·목표가)":[["최신 공시","단일판매·공급계약 (5/27)",""],["애널 목표가","상향 ↑ 420,000 (NH, 5/30)","pos"]],
+  "시장·섹터":[["시장 환경","코스닥 정배열·우상향","pos"],["섹터 강도","로봇·자동화 강세 (상위 5%)","pos"]],
+  "리스크 관리":[["진입가","285,000",""],["손절(SL)","262,000 (-8.1%)","neg"],["목표 TP1/TP2","331,000 / 354,000",""],["현재 손익비","+4.8R","pos"],["VI 근접","여유 (+6.2%)",""]],
+  "보유 현황":[["평단 / 손익","285,000 · +38.4%","pos"],["보유 기간","⚠ 12일차 (원칙 1~3일 초과)","warn"]],
+  펀더멘털:[["평가","우수 (Good)","pos"]],
+};
+const SC_MARKERS=[
+  {i:10,t:"셋업 형성 중",c:"#8a8f99",pos:"below"},
+  {i:25,t:"돌파 진입",c:"#1f9d73",pos:"below"},
+  {i:38,t:"진입",c:"#1f9d73",pos:"below"},
+  {i:46,t:"1차 분할청산",c:"#e69533",pos:"above"},
+  {i:51,t:"과열 경고",c:"#e0564e",pos:"above"},
+  {i:60,t:"8선 이탈",c:"#e69533",pos:"above"},
+];
+const SC_LEVELS=[
+  {p:285000,label:"진입 285,000",color:"#8a8f99",dash:[2,3]},
+  {p:262000,label:"SL 262,000",color:"#e0564e",dash:[6,4]},
+  {p:331000,label:"TP1 331,000",color:"#3f86d4",dash:[6,4]},
+  {p:354000,label:"TP2 354,000",color:"#3f86d4",dash:[6,4]},
+];
+
+/* ---------- 캔들 차트 (외부 라이브러리 없이 캔버스로) ---------- */
+function SCCandleChart({candles, markers, levels}){
+  const ref=useRef(null);
+  useEffect(()=>{
+    const cv=ref.current; if(!cv||!candles.length) return;
+    const ctx=cv.getContext("2d");
+    let hover=-1;
+    const closes=candles.map(c=>c.close);
+    const e8=scEma(closes,8), e21=scEma(closes,21), e55=scEma(closes,55);
+    const padL=10,padR=92,padT=16,padB=22;
+    let W,H,xStep,minP,maxP;
+    function layout(){
+      const dpr=window.devicePixelRatio||1; const rect=cv.getBoundingClientRect();
+      W=rect.width; H=rect.height; cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+      const all=candles.flatMap(d=>[d.high,d.low]).concat(e55,levels.map(l=>l.p));
+      minP=Math.min(...all); maxP=Math.max(...all); const pad=(maxP-minP)*0.07; minP-=pad; maxP+=pad;
+      xStep=(W-padL-padR)/candles.length;
+    }
+    const X=i=>padL+xStep*(i+0.5), Y=p=>padT+(H-padT-padB)*(1-(p-minP)/(maxP-minP));
+    const fmt=v=>Math.round(v).toLocaleString();
+    function rr(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+    function lineS(a,c,w){ctx.beginPath();ctx.lineWidth=w;ctx.strokeStyle=c;a.forEach((v,i)=>{const x=X(i),y=Y(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}
+    function pill(x,y,t,c){ctx.font="600 11px "+SC_FONT;const w=ctx.measureText(t).width+12,h=17;let bx=Math.max(2,Math.min(W-padR-w,x-w/2));rr(bx,y,w,h,5);ctx.fillStyle=c;ctx.fill();ctx.fillStyle="#fff";ctx.textBaseline="middle";ctx.textAlign="center";ctx.fillText(t,bx+w/2,y+h/2+.5);}
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      ctx.strokeStyle="#e7e9ee";ctx.fillStyle="#79808d";ctx.font="10px "+SC_FONT;ctx.textAlign="left";ctx.textBaseline="middle";
+      for(let g=0;g<=4;g++){const p=minP+(maxP-minP)*g/4,y=Y(p);ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.fillText(fmt(p),W-padR+6,y);}
+      levels.forEach(l=>{const y=Y(l.p);ctx.setLineDash(l.dash);ctx.strokeStyle=l.color;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.setLineDash([]);ctx.font="700 10px "+SC_FONT;const w=ctx.measureText(l.label).width+10;rr(W-padR+2,y-8,w,16,4);ctx.fillStyle=l.color;ctx.fill();ctx.fillStyle="#fff";ctx.textAlign="left";ctx.fillText(l.label,W-padR+7,y+.5);});
+      lineS(e55,"#d8b53f",2);lineS(e21,"#e69533",1.6);lineS(e8,"#c2c6cd",1.6);
+      const bw=Math.max(2,xStep*0.62);
+      candles.forEach((d,i)=>{const up=d.close>=d.open,c=up?"#1f9d73":"#e0584d",x=X(i);ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,Y(d.high));ctx.lineTo(x,Y(d.low));ctx.stroke();const yo=Y(d.open),yc=Y(d.close);ctx.fillStyle=c;ctx.fillRect(x-bw/2,Math.min(yo,yc),bw,Math.max(1.5,Math.abs(yc-yo)));});
+      markers.forEach(m=>{const d=candles[m.i];if(!d)return;const x=X(m.i);const py=m.pos==="above"?Y(d.high)-26:Y(d.low)+8;ctx.fillStyle=m.c;ctx.beginPath();ctx.arc(x,m.pos==="above"?Y(d.high)-4:Y(d.low)+4,3,0,7);ctx.fill();pill(x,py,m.t,m.c);});
+      if(hover>=0){const d=candles[hover],x=X(hover);ctx.setLineDash([4,4]);ctx.strokeStyle="rgba(60,60,70,.4)";ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,H-padB);ctx.stroke();ctx.setLineDash([]);const t=`시 ${fmt(d.open)}  고 ${fmt(d.high)}  저 ${fmt(d.low)}  종 ${fmt(d.close)}`;ctx.font="600 11px "+SC_FONT;const tw=ctx.measureText(t).width+16;let tx=Math.min(W-padR-tw,Math.max(2,x-tw/2));rr(tx,2,tw,20,6);ctx.fillStyle="rgba(29,35,48,.93)";ctx.fill();ctx.fillStyle="#fff";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(t,tx+8,12);}
+    }
+    function onMove(e){const rect=cv.getBoundingClientRect();const i=Math.round((e.clientX-rect.left-padL)/xStep-0.5);hover=(i>=0&&i<candles.length)?i:-1;draw();}
+    function onLeave(){hover=-1;draw();}
+    function resize(){layout();draw();}
+    resize();
+    window.addEventListener("resize",resize);
+    cv.addEventListener("pointermove",onMove);
+    cv.addEventListener("pointerleave",onLeave);
+    return ()=>{window.removeEventListener("resize",resize);cv.removeEventListener("pointermove",onMove);cv.removeEventListener("pointerleave",onLeave);};
+  },[candles,markers,levels]);
+  return <canvas ref={ref} style={{width:"100%",height:"460px",display:"block"}} />;
+}
+
+/* ---------- 대시보드 ---------- */
+function SCDash({dash}){
+  const color=c=>c==="pos"?"#1f9d73":c==="neg"?"#e0564e":c==="warn"?"#e69533":"#1d2330";
+  return (
+    <div style={{background:"#fff",border:"1px solid #e7e9ee",borderRadius:12,padding:"12px 14px"}}>
+      {Object.entries(dash).map(([sec,rows])=>(
+        <div key={sec}>
+          <div style={{fontSize:11,letterSpacing:".05em",color:"#79808d",fontWeight:800,margin:"13px 0 4px",textTransform:"uppercase"}}>{sec}</div>
+          {rows.map(([k,v,cls,dot],idx)=>(
+            <div key={idx} style={{display:"flex",justifyContent:"space-between",gap:10,padding:"5px 0",borderBottom:"1px solid #e7e9ee",fontSize:13}}>
+              <span style={{color:"#79808d",whiteSpace:"nowrap"}}>{k}</span>
+              <span style={{fontWeight:700,color:color(cls),textAlign:"right",display:"flex",alignItems:"center",gap:6,fontVariantNumeric:"tabular-nums"}}>
+                {dot&&<span style={{width:9,height:9,borderRadius:"50%",background:color(cls),flex:"none"}}/>}{v}
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------- 시그널 차트 메인 (탭에 임베드) ---------- */
+function SignalChartTab(){
+  const [query,setQuery]=useState("");
+  const [name,setName]=useState("로보월드");
+  const [code,setCode]=useState("DEMO");
+  const [candles,setCandles]=useState(scMakeDemo());
+  const [markers]=useState(SC_MARKERS);
+  const [levels]=useState(SC_LEVELS);
+  const [dash]=useState(SC_DASH);
+  const [live,setLive]=useState(false);
+
+  // 실시간 모드: 서버 주소가 채워져 있을 때만 동작
+  useEffect(()=>{
+    if(!SC_SERVER_URL||code==="DEMO") return;
+    let ws;
+    (async()=>{
+      try{
+        const res=await fetch(`${SC_SERVER_URL}/api/chart/${code}`);
+        const data=await res.json();
+        setCandles(data.candles.map(c=>({open:c.open,high:c.high,low:c.low,close:c.close})));
+        setLive(true);
+        ws=new WebSocket(`${SC_SERVER_URL.replace(/^http/,"ws")}/ws/${code}`);
+        ws.onmessage=e=>{
+          const t=JSON.parse(e.data);
+          if(t.price) setCandles(prev=>{const n=[...prev];n[n.length-1]={...n[n.length-1],close:t.price,high:Math.max(n[n.length-1].high,t.price),low:Math.min(n[n.length-1].low,t.price)};return n;});
+        };
+      }catch(err){/* 서버 미준비 시 예시 데이터 유지 */}
+    })();
+    return ()=>ws&&ws.close();
+  },[code]);
+
+  const search=()=>{ if(!query.trim())return; setName(query.trim()); setCode(SC_SERVER_URL?query.trim():"DEMO"); };
+
+  return (
+    <div style={{fontFamily:SC_FONT,background:"transparent",padding:0}}>
+      <div style={{maxWidth:1300,margin:"0 auto"}}>
+        <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+          <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&search()}
+            placeholder="종목명 또는 코드 검색"
+            style={{flex:"1 1 200px",padding:"9px 12px",borderRadius:8,border:"1px solid #e7e9ee",fontSize:14,fontFamily:SC_FONT}}/>
+          <button onClick={search} style={{padding:"9px 18px",borderRadius:8,border:"none",background:"#1d2330",color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>조회</button>
+        </div>
+
+        <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",padding:"2px 2px 12px"}}>
+          <span style={{fontWeight:800,fontSize:18}}>{name} <span style={{color:"#79808d",fontWeight:600,fontSize:12.5}}>· KRX · 1D</span></span>
+          <span style={{fontWeight:800,fontSize:19,color:"#1f9d73",fontVariantNumeric:"tabular-nums"}}>394,500</span>
+          <span style={{fontWeight:700,fontSize:13,color:"#1f9d73"}}>+69,000 (+21.20%)</span>
+          <span style={{marginLeft:"auto",fontSize:11,color:"#79808d",border:"1px solid #e7e9ee",padding:"3px 9px",borderRadius:6,background:"#fff"}}>
+            {live?"● 실시간":"예시 데이터 · 실거래 아님"}
+          </span>
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 348px",gap:14}} className="sc-grid">
+          <div style={{background:"#fff",border:"1px solid #e7e9ee",borderRadius:12,padding:6}}>
+            <SCCandleChart candles={candles} markers={markers} levels={levels}/>
+          </div>
+          <SCDash dash={dash}/>
+        </div>
+
+        <style>{`@media(max-width:840px){.sc-grid{grid-template-columns:1fr !important;}}`}</style>
+      </div>
+    </div>
+  );
+}
+
 // ── AI 분석 탭 (서브탭 구조) ──
 function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, user }) {
-  const [subTab, setSubTab] = React.useState("sell");
+  const [subTab, setSubTab] = React.useState("sector");
   const [loading, setLoading] = React.useState(false);
   const [result, setResult] = React.useState(null);
   const [error, setError] = React.useState(null);
 
   const SUB_TABS = [
-    { id:"sell",  label:"💸 매도 판단" },
     { id:"sector",label:"🔮 순환매" },
     { id:"plan",  label:"📋 매매 플랜" },
-    { id:"check", label:"🔍 종목 체크" },
+    { id:"signal",label:"📊 시그널 차트" },
   ];
+
+  // 배포(HTTPS)에서 HTTP 오라클 호출은 브라우저가 차단(Mixed Content)
+  const oracleBlocked = typeof location !== "undefined" && location.protocol === "https:";
 
   // buildPrompt - 기존 로직 유지
   const buildPrompt = (mode) => {
@@ -1423,6 +1635,11 @@ function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, us
 
   const runAnalysis = async(mode) => {
     setLoading(true); setResult(null); setError(null);
+    if (oracleBlocked) {
+      setError("⏸ 오라클 서버 HTTPS 설정 전까지 일시 비활성화예요. 지금 페이지가 HTTPS(배포)라 HTTP 오라클(140.83.51.201) 호출이 브라우저에서 차단돼요. 로컬(http) 환경에서는 정상 동작하고, 오라클 HTTPS 적용 후 배포에서도 자동으로 켜집니다.");
+      setLoading(false);
+      return;
+    }
     try {
       const res = await fetch("http://140.83.51.201:5000/api/analyze", {
         method:"POST", headers:{"Content-Type":"application/json"},
@@ -1463,36 +1680,6 @@ function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, us
         ))}
       </div>
 
-      {/* 💸 매도 판단 */}
-      {subTab==="sell"&&<>
-        <div style={{background:"linear-gradient(135deg,#2a9d8f,#1a7a6e)",borderRadius:18,padding:16,color:"white"}}>
-          <div style={{fontSize:20,marginBottom:4}}>💸</div>
-          <div style={{fontWeight:900,fontSize:15,marginBottom:2}}>보유 종목 매도 판단</div>
-          <div style={{fontSize:11,opacity:.85}}>지금 팔아야 하나 버텨야 하나</div>
-          {holdings.length>0&&<div style={{marginTop:10,display:"flex",flexWrap:"wrap",gap:6}}>
-            {holdings.map(h=>(
-              <div key={h.stock} style={{background:"rgba(255,255,255,0.2)",borderRadius:8,padding:"4px 10px"}}>
-                <div style={{fontSize:12,fontWeight:700}}>{h.stock}</div>
-                <div style={{fontSize:10,opacity:.8}}>{h.buy_price?.toLocaleString()}원 · D+{Math.floor((new Date()-new Date(h.buy_date))/86400000)}</div>
-              </div>
-            ))}
-          </div>}
-          {holdings.length===0&&<div style={{fontSize:11,opacity:.7,marginTop:6}}>관심종목 탭에서 매수 입력하면 여기서 분석돼요</div>}
-        </div>
-        <button onClick={()=>runAnalysis("sell")} disabled={loading||holdings.length===0}
-          style={{padding:"14px",borderRadius:14,border:"none",background:holdings.length===0?"#e0e0e0":"linear-gradient(135deg,#2a9d8f,#1a7a6e)",color:"white",fontWeight:700,fontSize:14,cursor:holdings.length===0?"not-allowed":"pointer"}}>
-          {loading?"분석 중...":"🔍 매도 판단 시작"}
-        </button>
-        {error&&<div style={{background:C.red2,borderRadius:12,padding:14,fontSize:13,color:"#c0392b",fontWeight:700}}>⚠️ {error}</div>}
-        {result&&result.mode==="sell"&&!loading&&<div style={{background:C.card,borderRadius:18,border:`1.5px solid #a8e6cf`,overflow:"hidden"}}>
-          <div style={{padding:"12px 16px",background:C.mint2,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span style={{fontWeight:800,fontSize:13,color:"#2a9d8f"}}>💸 매도 판단 결과</span>
-            <button onClick={()=>setResult(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:14,color:C.sub}}>✕</button>
-          </div>
-          <div style={{padding:"14px 16px 18px",maxHeight:500,overflowY:"auto"}}>{renderText(result.text)}</div>
-        </div>}
-      </>}
-
       {/* 🔮 순환매 */}
       {subTab==="sector"&&<>
         <div style={{background:"linear-gradient(135deg,#7b2ff7,#9b59b6)",borderRadius:18,padding:16,color:"white"}}>
@@ -1500,11 +1687,14 @@ function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, us
           <div style={{fontWeight:900,fontSize:15,marginBottom:2}}>섹터 순환매 예측</div>
           <div style={{fontSize:11,opacity:.85}}>기록된 테마 흐름 기반 다음 강세 섹터 분석</div>
         </div>
-        <button onClick={()=>runAnalysis("sector")} disabled={loading}
-          style={{padding:"14px",borderRadius:14,border:"none",background:"linear-gradient(135deg,#7b2ff7,#9b59b6)",color:"white",fontWeight:700,fontSize:14,cursor:loading?"not-allowed":"pointer"}}>
-          {loading?"분석 중...":"🔍 순환매 분석 시작"}
+        {oracleBlocked&&<div style={{background:"#fdf6cc",border:`1.5px solid #e0c040`,borderRadius:12,padding:"10px 14px",fontSize:12,color:"#7a6010",lineHeight:1.6,fontWeight:600}}>
+          ⏸ 오라클 HTTPS 설정 전까지 배포(HTTPS) 환경에서는 일시 비활성화예요. 로컬(http)에서는 정상 동작해요.
+        </div>}
+        <button onClick={()=>runAnalysis("sector")} disabled={loading||oracleBlocked}
+          style={{padding:"14px",borderRadius:14,border:"none",background:oracleBlocked?"#e0e0e0":"linear-gradient(135deg,#7b2ff7,#9b59b6)",color:"white",fontWeight:700,fontSize:14,cursor:(loading||oracleBlocked)?"not-allowed":"pointer"}}>
+          {loading?"분석 중...":oracleBlocked?"오라클 HTTPS 준비 중 (일시 비활성화)":"🔍 순환매 분석 시작"}
         </button>
-        {error&&<div style={{background:C.red2,borderRadius:12,padding:14,fontSize:13,color:"#c0392b",fontWeight:700}}>⚠️ {error}</div>}
+        {error&&<div style={{background:C.red2,borderRadius:12,padding:14,fontSize:13,color:"#c0392b",fontWeight:700,lineHeight:1.6}}>⚠️ {error}</div>}
         {result&&result.mode==="sector"&&!loading&&<div style={{background:C.card,borderRadius:18,border:`1.5px solid #c8b8f8`,overflow:"hidden"}}>
           <div style={{padding:"12px 16px",background:"#f0e8ff",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <span style={{fontWeight:800,fontSize:13,color:"#7b2ff7"}}>🔮 순환매 예측 결과</span>
@@ -1515,10 +1705,10 @@ function AIAnalysisTab({ krRecords, usCards, ipoRecords, principle, holdings, us
       </>}
 
       {/* 📋 매매 플랜 */}
-      {subTab==="plan"&&<TradePlanTab/>}
+      {subTab==="plan"&&<TradePlanTab user={user}/>}
 
-      {/* 🔍 종목 체크 */}
-      {subTab==="check"&&<StockCheckTab/>}
+      {/* 📊 시그널 차트 */}
+      {subTab==="signal"&&<SignalChartTab/>}
 
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
