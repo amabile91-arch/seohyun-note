@@ -1504,7 +1504,8 @@ function SCCandleChart({candles, markers, levels, boxes=[]}){
       lineS(sma120,"#e0564e",1.4);lineS(sma60,"#7b2ff7",2.2);lineS(e21,"#e69533",1.5);lineS(e8,"#c2c6cd",1.4);
       const bw=Math.max(2,xStep*0.62);
       candles.forEach((d,i)=>{const up=d.close>=d.open,c=up?"#1f9d73":"#e0584d",x=X(i);ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,Y(d.high));ctx.lineTo(x,Y(d.low));ctx.stroke();const yo=Y(d.open),yc=Y(d.close);ctx.fillStyle=c;ctx.fillRect(x-bw/2,Math.min(yo,yc),bw,Math.max(1.5,Math.abs(yc-yo)));});
-      markers.forEach(m=>{const d=candles[m.i];if(!d)return;const x=X(m.i);const py=m.pos==="above"?Y(d.high)-26:Y(d.low)+8;ctx.fillStyle=m.c;ctx.beginPath();ctx.arc(x,m.pos==="above"?Y(d.high)-4:Y(d.low)+4,3,0,7);ctx.fill();pill(x,py,m.t,m.c);});
+      let lastA=-999,rowA=0,lastB=-999,rowB=0;
+      markers.forEach(m=>{const d=candles[m.i];if(!d)return;const x=X(m.i);const ab=m.pos==="above";let row;if(ab){row=(x-lastA<64)?++rowA:(rowA=0);lastA=x;}else{row=(x-lastB<64)?++rowB:(rowB=0);lastB=x;}ctx.fillStyle=m.c;ctx.beginPath();ctx.arc(x,ab?Y(d.high)-4:Y(d.low)+4,3,0,7);ctx.fill();const py=ab?Y(d.high)-26-row*19:Y(d.low)+8+row*19;pill(x,py,m.t,m.c);});
       if(hover>=0){const d=candles[hover],x=X(hover);ctx.setLineDash([4,4]);ctx.strokeStyle="rgba(60,60,70,.4)";ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,H-padB);ctx.stroke();ctx.setLineDash([]);const t=`시 ${fmt(d.open)}  고 ${fmt(d.high)}  저 ${fmt(d.low)}  종 ${fmt(d.close)}`;ctx.font="600 11px "+SC_FONT;const tw=ctx.measureText(t).width+16;let tx=Math.min(W-padR-tw,Math.max(2,x-tw/2));rr(tx,2,tw,20,6);ctx.fillStyle="rgba(29,35,48,.93)";ctx.fill();ctx.fillStyle="#fff";ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillText(t,tx+8,12);}
     }
     function onMove(e){const rect=cv.getBoundingClientRect();const i=Math.round((e.clientX-rect.left-padL)/xStep-0.5);hover=(i>=0&&i<candles.length)?i:-1;draw();}
@@ -1568,6 +1569,36 @@ function scComposite(d){
   const smart=(d.ema_alignment==="정배열"&&d.trend_energy>0&&!overheat)?"안정적 우상향":overheat?"과열 — 비중 관리":d.ema_alignment==="역배열"?"추세 약화":"중립";
   return {score:s,grade,eligible,smart,overheat};
 }
+function scRsi(v,p){p=p||14;const o=Array(v.length).fill(null);if(v.length<=p)return o;let g=0,l=0;for(let i=1;i<=p;i++){const d=v[i]-v[i-1];if(d>=0)g+=d;else l-=d;}let ag=g/p,al=l/p;o[p]=al===0?100:100-100/(1+ag/al);for(let i=p+1;i<v.length;i++){const d=v[i]-v[i-1];const gain=d>0?d:0,loss=d<0?-d:0;ag=(ag*(p-1)+gain)/p;al=(al*(p-1)+loss)/p;o[i]=al===0?100:100-100/(1+ag/al);}return o;}
+function scDetectSignals(candles){
+  if(!candles||candles.length<30) return [];
+  const closes=candles.map(c=>c.close);
+  const e8=scEma(closes,8), e21=scEma(closes,21), s60=scSma(closes,60), rsi=scRsi(closes,14);
+  const out=[];
+  for(let i=1;i<candles.length;i++){
+    // 진입: EMA8 골든크로스 EMA21 (+ 60일선 위면 추세 확인)
+    if(e8[i]>e21[i] && e8[i-1]<=e21[i-1]){
+      out.push({i,t:(s60[i]==null||closes[i]>=s60[i])?"🚀 진입":"진입(주의)",c:"#1f9d73",pos:"below"});
+    }
+    // 청산: EMA8 데드크로스 EMA21
+    else if(e8[i]<e21[i] && e8[i-1]>=e21[i-1]){
+      out.push({i,t:"청산",c:"#e69533",pos:"above"});
+    }
+    // 60선 이탈(손절 트리거): 종가가 60일선 아래로
+    if(s60[i]!=null && closes[i]<s60[i] && closes[i-1]>=s60[i-1]){
+      out.push({i,t:"60선 이탈",c:"#e0564e",pos:"below"});
+    }
+    // 과열 경고(비중축소): RSI 75 상향 돌파
+    if(rsi[i]!=null && rsi[i]>=75 && rsi[i-1]<75){
+      out.push({i,t:"⚠ 과열(비중축소)",c:"#e0564e",pos:"above"});
+    }
+    // 과열 해소 → 부분 익절 고려
+    else if(rsi[i]!=null && rsi[i-1]!=null && rsi[i]<75 && rsi[i-1]>=75){
+      out.push({i,t:"부분 익절고려",c:"#e69533",pos:"above"});
+    }
+  }
+  return out;
+}
 function scFmtNtby(v){ if(v==null) return "-"; const m=Math.round(v/10000); if(m>0) return "+"+m.toLocaleString()+"만주"; if(m<0) return m.toLocaleString()+"만주"; return "0"; }
 function buildLiveDash(d, risk, holding, market){
   const sign=v=>(v>0?"+":"")+v;
@@ -1584,6 +1615,7 @@ function buildLiveDash(d, risk, holding, market){
   const comp=scComposite(d);
   return {
     "판정":[
+      ["현재 시그널", d.now_signal||"-", (d.now_signal&&/진입|매수/.test(d.now_signal))?"pos":(d.now_signal&&/청산|이탈|과열|축소|익절/.test(d.now_signal))?"neg":"", "dot"],
       ["셋업 유형", d.setup||"-", scSetupColor(d.setup)],
       ["확신 등급", comp.grade, comp.grade.startsWith("A")?"pos":comp.grade.startsWith("D")?"neg":""],
       ["매수 자격", comp.eligible?"충족":"미충족", comp.eligible?"pos":"warn", "dot"],
@@ -1694,10 +1726,11 @@ function SignalChartTab({ holdings=[], favorites=[] }){
         const h=nm?(holdings||[]).find(x=>x.stock===nm):null;
         if(h&&h.buy_price){ hold={name:nm,buyPrice:h.buy_price,pnlPct:(entry-h.buy_price)/h.buy_price*100,days:daysDiff(h.buy_date)}; lv.push({p:h.buy_price,label:`평단 ${scFmtPrice(h.buy_price,market)}`,color:"#9b59b6",dash:[2,2]}); }
 
-        const comp=scComposite(dash0); const li=cs.length-1; const mk=[];
-        if(comp.overheat) mk.push({i:li,t:"과열 경고",c:"#e0564e",pos:"above"});
-        if(sma60Last!=null&&lastC.close<sma60Last) mk.push({i:li,t:"60선 이탈",c:"#e69533",pos:"below"});
-        setMarkers(mk); setLevels(lv);
+        const comp=scComposite(dash0);
+        const sig=scDetectSignals(cs);
+        const recent=sig.length?sig[sig.length-1]:null;
+        dash0.now_signal = (recent && (cs.length-1-recent.i)<=3) ? recent.t.replace(/[🚀⚠]/g,"").trim() : (comp.eligible?"매수 가능 구간":"관망 / 보유 유지");
+        setMarkers(sig.slice(-14)); setLevels(lv);
         if(data.dashboard) setDash(buildLiveDash(dash0, risk, hold, market));
         setLive(true);
 
