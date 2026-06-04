@@ -1570,32 +1570,48 @@ function scComposite(d){
   return {score:s,grade,eligible,smart,overheat};
 }
 function scRsi(v,p){p=p||14;const o=Array(v.length).fill(null);if(v.length<=p)return o;let g=0,l=0;for(let i=1;i<=p;i++){const d=v[i]-v[i-1];if(d>=0)g+=d;else l-=d;}let ag=g/p,al=l/p;o[p]=al===0?100:100-100/(1+ag/al);for(let i=p+1;i<v.length;i++){const d=v[i]-v[i-1];const gain=d>0?d:0,loss=d<0?-d:0;ag=(ag*(p-1)+gain)/p;al=(al*(p-1)+loss)/p;o[i]=al===0?100:100-100/(1+ag/al);}return o;}
-function scDetectSignals(candles){
-  if(!candles||candles.length<30) return [];
-  const closes=candles.map(c=>c.close);
-  const e8=scEma(closes,8), e21=scEma(closes,21), s60=scSma(closes,60), rsi=scRsi(closes,14);
-  const out=[];
-  for(let i=1;i<candles.length;i++){
-    // 진입: EMA8 골든크로스 EMA21 (+ 60일선 위면 추세 확인)
-    if(e8[i]>e21[i] && e8[i-1]<=e21[i-1]){
-      out.push({i,t:(s60[i]==null||closes[i]>=s60[i])?"🚀 진입":"진입(주의)",c:"#1f9d73",pos:"below"});
+function scAvg(a){let s=0;for(const x of a)s+=x;return a.length?s/a.length:0;}
+function scDetectSignals(candles, opts){
+  opts=opts||{};
+  if(!candles||candles.length<35) return [];
+  const closes=candles.map(c=>c.close),highs=candles.map(c=>c.high),lows=candles.map(c=>c.low),vols=candles.map(c=>c.volume||0);
+  const e8=scEma(closes,8),e21=scEma(closes,21),s60=scSma(closes,60),rsi=scRsi(closes,14);
+  const out=[],last={},COOL=3;
+  const push=(i,t,c,pos,key,cd)=>{ const cool=cd||COOL; if(last[key]!=null && i-last[key]<cool) return; last[key]=i; out.push({i,t,c,pos}); };
+  for(let i=21;i<candles.length;i++){
+    const up = e8[i]>e21[i] && (s60[i]==null || closes[i]>=s60[i]);
+    const aligned = s60[i]!=null && e8[i]>e21[i] && e21[i]>s60[i];           // 정배열
+    const trendUp = s60[i]!=null && s60[i-10]!=null && s60[i]>s60[i-10];     // 60일선 상승
+    const downAlign = e8[i]<e21[i] && (s60[i]!=null && e21[i]<s60[i]);
+    const disp = e8[i]? (closes[i]-e8[i])/e8[i]*100 : 0;        // 이격도(EMA8)
+    const volAvg = i>=20 ? scAvg(vols.slice(i-20,i)) : 0;
+    const volRatio = volAvg ? vols[i]/volAvg : 0;
+    const priorHigh = Math.max.apply(null, highs.slice(Math.max(0,i-10),i)); // 직전 10봉 고점(박스 상단)
+    const blockedEntry = downAlign || disp>=12;                  // 역배열·급등 추격 차단
+    // 진입 (진입 쿨다운 6봉)
+    if(!blockedEntry){
+      if(closes[i]>priorHigh && volRatio>=2 && e8[i]>=e21[i]){
+        push(i,"돌파 진입","#1f9d73","below","entry",6);          // 박스 상단 돌파 + 거래량 2배+
+      } else if(aligned && trendUp && lows[i-1]<=e21[i-1] && closes[i]>e21[i] && closes[i]>closes[i-1]){
+        push(i,"눌림 진입","#1f9d73","below","entry",6);          // 상승추세 EMA21 눌림 후 반등
+      }
     }
-    // 청산: EMA8 데드크로스 EMA21
-    else if(e8[i]<e21[i] && e8[i-1]>=e21[i-1]){
-      out.push({i,t:"청산",c:"#e69533",pos:"above"});
+    // 과열(비중축소): 이격도 + RSI 동시
+    if(disp>=12 && rsi[i]!=null && rsi[i]>=72){
+      push(i,"⚠ 과열(비중축소)","#e0564e","above","overheat");
     }
-    // 60선 이탈(손절 트리거): 종가가 60일선 아래로
+    // 추세 약화(부분청산): EMA21 종가 이탈
+    if(closes[i]<e21[i] && closes[i-1]>=e21[i-1]){
+      push(i,"추세 약화","#e69533","above","weak");
+    }
+    // 손절(전량): 60일선 이탈
     if(s60[i]!=null && closes[i]<s60[i] && closes[i-1]>=s60[i-1]){
-      out.push({i,t:"60선 이탈",c:"#e0564e",pos:"below"});
+      push(i,"60선 이탈(손절)","#e0564e","below","stop");
     }
-    // 과열 경고(비중축소): RSI 75 상향 돌파
-    if(rsi[i]!=null && rsi[i]>=75 && rsi[i-1]<75){
-      out.push({i,t:"⚠ 과열(비중축소)",c:"#e0564e",pos:"above"});
-    }
-    // 과열 해소 → 부분 익절 고려
-    else if(rsi[i]!=null && rsi[i-1]!=null && rsi[i]<75 && rsi[i-1]>=75){
-      out.push({i,t:"부분 익절고려",c:"#e69533",pos:"above"});
-    }
+  }
+  // 수급 동반매수면 "오늘"의 진입을 강한 진입으로 승격
+  if(opts.supplyOk){
+    for(let k=out.length-1;k>=0;k--){ if(out[k].t.indexOf("진입")>=0){ if(out[k].i===candles.length-1) out[k]={...out[k],t:"🚀 강한 진입"}; break; } }
   }
   return out;
 }
@@ -1615,7 +1631,7 @@ function buildLiveDash(d, risk, holding, market){
   const comp=scComposite(d);
   return {
     "판정":[
-      ["현재 시그널", d.now_signal||"-", (d.now_signal&&/진입|매수/.test(d.now_signal))?"pos":(d.now_signal&&/청산|이탈|과열|축소|익절/.test(d.now_signal))?"neg":"", "dot"],
+      ["현재 시그널", d.now_signal||"-", (d.now_signal&&/진입|매수/.test(d.now_signal))?"pos":(d.now_signal&&/청산|이탈|과열|축소|익절|약화/.test(d.now_signal))?"neg":"", "dot"],
       ["셋업 유형", d.setup||"-", scSetupColor(d.setup)],
       ["확신 등급", comp.grade, comp.grade.startsWith("A")?"pos":comp.grade.startsWith("D")?"neg":""],
       ["매수 자격", comp.eligible?"충족":"미충족", comp.eligible?"pos":"warn", "dot"],
@@ -1727,7 +1743,7 @@ function SignalChartTab({ holdings=[], favorites=[] }){
         if(h&&h.buy_price){ hold={name:nm,buyPrice:h.buy_price,pnlPct:(entry-h.buy_price)/h.buy_price*100,days:daysDiff(h.buy_date)}; lv.push({p:h.buy_price,label:`평단 ${scFmtPrice(h.buy_price,market)}`,color:"#9b59b6",dash:[2,2]}); }
 
         const comp=scComposite(dash0);
-        const sig=scDetectSignals(cs);
+        const sig=scDetectSignals(cs,{supplyOk:(dash0.frgn_ntby>0&&dash0.inst_ntby>0)});
         const recent=sig.length?sig[sig.length-1]:null;
         dash0.now_signal = (recent && (cs.length-1-recent.i)<=3) ? recent.t.replace(/[🚀⚠]/g,"").trim() : (comp.eligible?"매수 가능 구간":"관망 / 보유 유지");
         setMarkers(sig.slice(-14)); setLevels(lv);
