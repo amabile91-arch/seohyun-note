@@ -1444,6 +1444,7 @@ function scMakeDemo(){
   return out;
 }
 function scEma(v,p){const k=2/(p+1);const o=[v[0]];for(let i=1;i<v.length;i++)o.push(v[i]*k+o[i-1]*(1-k));return o;}
+function scSma(v,p){const o=[];for(let i=0;i<v.length;i++){if(i<p-1){o.push(null);continue;}let s=0;for(let j=i-p+1;j<=i;j++)s+=v[j];o.push(s/p);}return o;}
 
 const SC_DASH = {
   판정:[["시그널","매수 진입","pos","dot"],["확신 등급","A (강한)",""],["셋업 유형","우상향 (클린 추세)","pos"],["SMART 평가","안정적 우상향","pos"]],
@@ -1479,28 +1480,28 @@ function SCCandleChart({candles, markers, levels, boxes=[]}){
     const ctx=cv.getContext("2d");
     let hover=-1;
     const closes=candles.map(c=>c.close);
-    const e8=scEma(closes,8), e21=scEma(closes,21), e55=scEma(closes,55);
+    const e8=scEma(closes,8), e21=scEma(closes,21), sma60=scSma(closes,60), sma120=scSma(closes,120);
     const padL=10,padR=92,padT=16,padB=22;
     let W,H,xStep,minP,maxP;
     function layout(){
       const dpr=window.devicePixelRatio||1; const rect=cv.getBoundingClientRect();
       W=rect.width; H=rect.height; cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
-      const all=candles.flatMap(d=>[d.high,d.low]).concat(e55,levels.map(l=>l.p));
+      const all=candles.flatMap(d=>[d.high,d.low]).concat(sma60.filter(x=>x!=null),sma120.filter(x=>x!=null));
       minP=Math.min(...all); maxP=Math.max(...all); const pad=(maxP-minP)*0.07; minP-=pad; maxP+=pad;
       xStep=(W-padL-padR)/candles.length;
     }
     const X=i=>padL+xStep*(i+0.5), Y=p=>padT+(H-padT-padB)*(1-(p-minP)/(maxP-minP));
     const fmt=v=>Math.round(v).toLocaleString();
     function rr(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
-    function lineS(a,c,w){ctx.beginPath();ctx.lineWidth=w;ctx.strokeStyle=c;a.forEach((v,i)=>{const x=X(i),y=Y(v);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}
+    function lineS(a,c,w){ctx.beginPath();ctx.lineWidth=w;ctx.strokeStyle=c;let st=false;a.forEach((v,i)=>{if(v==null){st=false;return;}const x=X(i),y=Y(v);if(st)ctx.lineTo(x,y);else ctx.moveTo(x,y);st=true;});ctx.stroke();}
     function pill(x,y,t,c){ctx.font="600 11px "+SC_FONT;const w=ctx.measureText(t).width+12,h=17;let bx=Math.max(2,Math.min(W-padR-w,x-w/2));rr(bx,y,w,h,5);ctx.fillStyle=c;ctx.fill();ctx.fillStyle="#fff";ctx.textBaseline="middle";ctx.textAlign="center";ctx.fillText(t,bx+w/2,y+h/2+.5);}
     function draw(){
       ctx.clearRect(0,0,W,H);
       ctx.strokeStyle="#e7e9ee";ctx.fillStyle="#79808d";ctx.font="10px "+SC_FONT;ctx.textAlign="left";ctx.textBaseline="middle";
       for(let g=0;g<=4;g++){const p=minP+(maxP-minP)*g/4,y=Y(p);ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.fillText(fmt(p),W-padR+6,y);}
       boxes.forEach(b=>{const x1=X(b.from)-xStep/2,x2=X(b.to)+xStep/2,yT=Y(b.top),yB=Y(b.bottom);ctx.fillStyle="rgba(123,47,247,0.08)";ctx.fillRect(x1,yT,x2-x1,yB-yT);ctx.setLineDash([4,3]);ctx.strokeStyle="rgba(123,47,247,0.45)";ctx.lineWidth=1;ctx.strokeRect(x1,yT,x2-x1,yB-yT);ctx.setLineDash([]);ctx.font="700 10px "+SC_FONT;ctx.fillStyle="#7b2ff7";ctx.textAlign="left";ctx.fillText("응축 박스",x1+4,yT+8);});
-      levels.forEach(l=>{const y=Y(l.p);ctx.setLineDash(l.dash);ctx.strokeStyle=l.color;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.setLineDash([]);ctx.font="700 10px "+SC_FONT;const w=ctx.measureText(l.label).width+10;rr(W-padR+2,y-8,w,16,4);ctx.fillStyle=l.color;ctx.fill();ctx.fillStyle="#fff";ctx.textAlign="left";ctx.fillText(l.label,W-padR+7,y+.5);});
-      lineS(e55,"#d8b53f",2);lineS(e21,"#e69533",1.6);lineS(e8,"#c2c6cd",1.6);
+      levels.forEach(l=>{if(l.p<minP||l.p>maxP)return;const y=Y(l.p);ctx.setLineDash(l.dash);ctx.strokeStyle=l.color;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.setLineDash([]);ctx.font="700 10px "+SC_FONT;const w=ctx.measureText(l.label).width+10;rr(W-padR+2,y-8,w,16,4);ctx.fillStyle=l.color;ctx.fill();ctx.fillStyle="#fff";ctx.textAlign="left";ctx.fillText(l.label,W-padR+7,y+.5);});
+      lineS(sma120,"#e0564e",1.4);lineS(sma60,"#7b2ff7",2.2);lineS(e21,"#e69533",1.5);lineS(e8,"#c2c6cd",1.4);
       const bw=Math.max(2,xStep*0.62);
       candles.forEach((d,i)=>{const up=d.close>=d.open,c=up?"#1f9d73":"#e0584d",x=X(i);ctx.strokeStyle=c;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,Y(d.high));ctx.lineTo(x,Y(d.low));ctx.stroke();const yo=Y(d.open),yc=Y(d.close);ctx.fillStyle=c;ctx.fillRect(x-bw/2,Math.min(yo,yc),bw,Math.max(1.5,Math.abs(yc-yo)));});
       markers.forEach(m=>{const d=candles[m.i];if(!d)return;const x=X(m.i);const py=m.pos==="above"?Y(d.high)-26:Y(d.low)+8;ctx.fillStyle=m.c;ctx.beginPath();ctx.arc(x,m.pos==="above"?Y(d.high)-4:Y(d.low)+4,3,0,7);ctx.fill();pill(x,py,m.t,m.c);});
@@ -1552,6 +1553,21 @@ function scFmtMoney(v, market){
 }
 function scFmtPrice(v, market){ return market==="us" ? Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : Math.round(v).toLocaleString(); }
 function scSetupColor(s){ if(!s)return""; if(s.includes("우상향"))return"pos"; if(s.includes("급등주"))return"warn"; if(s.includes("추세이탈")||s.includes("역배열"))return"neg"; return""; }
+function scComposite(d){
+  let s=0;
+  if(d.ema_alignment==="정배열") s+=2; else if(d.ema_alignment==="역배열") s-=1;
+  if(d.trend_energy>0) s+=1;
+  if(d.vol_ratio>=2) s+=1;
+  if(d.frgn_ntby>0&&d.inst_ntby>0) s+=2; else if(d.frgn_ntby>0||d.inst_ntby>0) s+=1;
+  if(d.rsi!=null&&d.rsi>=45&&d.rsi<=70) s+=1; else if(d.rsi>=75) s-=1;
+  if(d.box_compressed) s+=1;
+  if(d.from_52w_high!=null&&d.from_52w_high>=-5) s+=1;
+  const overheat=(d.rsi>=75)||(d.disparity8!=null&&d.disparity8>=12);
+  const grade=s>=6?"A (강함)":s>=4?"B (양호)":s>=2?"C (보통)":"D (약함)";
+  const eligible=(s>=4&&!overheat);
+  const smart=(d.ema_alignment==="정배열"&&d.trend_energy>0&&!overheat)?"안정적 우상향":overheat?"과열 — 비중 관리":d.ema_alignment==="역배열"?"추세 약화":"중립";
+  return {score:s,grade,eligible,smart,overheat};
+}
 function scFmtNtby(v){ if(v==null) return "-"; const m=Math.round(v/10000); if(m>0) return "+"+m.toLocaleString()+"만주"; if(m<0) return m.toLocaleString()+"만주"; return "0"; }
 function buildLiveDash(d, risk, holding, market){
   const sign=v=>(v>0?"+":"")+v;
@@ -1565,8 +1581,14 @@ function buildLiveDash(d, risk, holding, market){
       bu?["동반 매수","외인·기관 동시","pos","dot"]:bd?["동반 매도","외인·기관 동시 매도","neg","dot"]:["수급 방향","엇갈림",""],
     ];
   } else { supplyRows=[["데이터","준비 중",""]]; }
+  const comp=scComposite(d);
   return {
-    "판정":[["셋업 유형", d.setup||"-", scSetupColor(d.setup)]],
+    "판정":[
+      ["셋업 유형", d.setup||"-", scSetupColor(d.setup)],
+      ["확신 등급", comp.grade, comp.grade.startsWith("A")?"pos":comp.grade.startsWith("D")?"neg":""],
+      ["매수 자격", comp.eligible?"충족":"미충족", comp.eligible?"pos":"warn", "dot"],
+      ["SMART 평가", comp.smart, comp.overheat?"warn":comp.smart.includes("우상향")?"pos":""],
+    ],
     "추세 · 강도":[
       ["EMA 정렬", d.ema_alignment||"-", d.ema_alignment==="정배열"?"pos":d.ema_alignment==="역배열"?"neg":""],
       ["추세 에너지", d.trend_energy!=null?String(d.trend_energy):"-", d.trend_energy>0?"pos":d.trend_energy<0?"neg":""],
@@ -1587,6 +1609,7 @@ function buildLiveDash(d, risk, holding, market){
       ["현재가(가정 진입)", scFmtPrice(risk.entry, market), ""],
       ["손절(SL)", `${scFmtPrice(risk.sl, market)} (${risk.slPct.toFixed(1)}%)`, "neg"],
       ["목표 TP1 / TP2", `${scFmtPrice(risk.tp1, market)} / ${scFmtPrice(risk.tp2, market)}`, "pos"],
+      ["손익비 (R/R)", "TP1 1.5 : 1  ·  TP2 3.0 : 1", ""],
     ] : [["계산 불가","데이터 부족",""]],
     "보유 현황": holding ? [
       ["종목 / 평단", `${holding.name} · ${scFmtPrice(holding.buyPrice, market)}`, ""],
@@ -1645,11 +1668,14 @@ function SignalChartTab({ holdings=[], favorites=[] }){
         }
         setBoxes(box?[box]:[]);
 
-        // 손절/목표: 응축이면 박스 저점, 아니면 ATR×1.5 (둘 다 기계적 참고선)
+        // 손절/목표: 60일선 우선 → 응축 박스 저점 → ATR×1.5 (모두 기계적 참고선)
+        const closes=cs.map(c=>c.close);
+        const sma60arr=scSma(closes,60), sma60Last=sma60arr[sma60arr.length-1];
         let risk=null, lv=[];
         const mkLevels=(sl)=>{ const R=entry-sl; if(!(R>0)) return null; return {sl:rnd(sl),tp1:rnd(entry+1.5*R),tp2:rnd(entry+3*R)}; };
         let calc=null, base="";
-        if(box){ calc=mkLevels(box.bottom); base="응축 박스 저점"; }
+        if(sma60Last!=null){ calc=mkLevels(sma60Last); base="60일선"; }
+        if(!calc && box){ calc=mkLevels(box.bottom); base="응축 박스 저점"; }
         if(!calc && atr){ calc=mkLevels(entry-1.5*atr); base="ATR×1.5"; }
         if(calc){
           risk={entry:rnd(entry),sl:calc.sl,tp1:calc.tp1,tp2:calc.tp2,slPct:(calc.sl-entry)/entry*100,base};
@@ -1668,7 +1694,10 @@ function SignalChartTab({ holdings=[], favorites=[] }){
         const h=nm?(holdings||[]).find(x=>x.stock===nm):null;
         if(h&&h.buy_price){ hold={name:nm,buyPrice:h.buy_price,pnlPct:(entry-h.buy_price)/h.buy_price*100,days:daysDiff(h.buy_date)}; lv.push({p:h.buy_price,label:`평단 ${scFmtPrice(h.buy_price,market)}`,color:"#9b59b6",dash:[2,2]}); }
 
-        setMarkers([]); setLevels(lv);
+        const comp=scComposite(dash0); const li=cs.length-1; const mk=[];
+        if(comp.overheat) mk.push({i:li,t:"과열 경고",c:"#e0564e",pos:"above"});
+        if(sma60Last!=null&&lastC.close<sma60Last) mk.push({i:li,t:"60선 이탈",c:"#e69533",pos:"below"});
+        setMarkers(mk); setLevels(lv);
         if(data.dashboard) setDash(buildLiveDash(dash0, risk, hold, market));
         setLive(true);
 
@@ -1688,7 +1717,15 @@ function SignalChartTab({ holdings=[], favorites=[] }){
     return ()=>ws&&ws.close();
   },[code,market,excd]);
 
-  const search=()=>{ if(!query.trim())return; const q=market==="us"?query.trim().toUpperCase():query.trim(); setName(q); setCode(SC_SERVER_URL?q:"DEMO"); };
+  const search=()=>{
+    if(!query.trim())return;
+    const q=query.trim();
+    if(market==="us"){ const t=q.toUpperCase(); setName(t); setCode(SC_SERVER_URL?t:"DEMO"); setErr(""); return; }
+    if(/^\d{6}$/.test(q)){ setName(q); setCode(SC_SERVER_URL?q:"DEMO"); setErr(""); return; }
+    const f=(favorites||[]).find(x=>x&&x.name&&x.name.replace(/\s/g,"")===q.replace(/\s/g,""));
+    if(f&&f.code){ setName(f.name); setCode(SC_SERVER_URL?f.code:"DEMO"); setErr(""); }
+    else { setErr("이름 검색은 관심종목에 등록된 종목만 돼요. 그 외엔 종목코드(6자리)로 검색해줘요."); }
+  };
   const switchMarket=(m)=>{ if(m===market)return; setMarket(m); setCode("DEMO"); setLive(false); setQuery(""); };
   const up=px.change>=0, col=up?"#1f9d73":"#e0564e";
   const seg=(active)=>({padding:"7px 16px",borderRadius:8,border:"none",fontWeight:700,fontSize:13,cursor:"pointer",background:active?"#1d2330":"#eef0f3",color:active?"#fff":"#79808d"});
@@ -1706,7 +1743,7 @@ function SignalChartTab({ holdings=[], favorites=[] }){
             <option value="NAS">나스닥</option><option value="NYS">뉴욕</option><option value="AMS">아멕스</option>
           </select>}
           <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==="Enter"&&search()}
-            placeholder={market==="us"?"티커 (예: AAPL, NVDA)":"종목코드 6자리 (예: 005930)"}
+            placeholder={market==="us"?"티커 (예: AAPL, NVDA)":"코드 6자리 또는 관심종목 이름"}
             style={{flex:"1 1 180px",padding:"9px 12px",borderRadius:8,border:"1px solid #e7e9ee",fontSize:14,fontFamily:SC_FONT}}/>
           <button onClick={search} style={{padding:"9px 18px",borderRadius:8,border:"none",background:"#1d2330",color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}}>조회</button>
         </div>
